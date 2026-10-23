@@ -1,0 +1,3243 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>CanvasRef - Infinite Reference & Drawing Board</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <!-- Google Identity Services (GIS) & Google API Client library -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script src="https://apis.google.com/js/api.js" async defer></script>
+
+  <style>
+    :root {
+      --bg-dark: #121316;
+      --panel-bg: rgba(22, 24, 29, 0.94);
+      --accent: #3b82f6;
+    }
+    *, *::before, *::after {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+    body, html {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      user-select: none;
+      -webkit-user-select: none;
+      touch-action: none;
+      background-color: var(--bg-dark);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      color: #e2e8f0;
+    }
+
+    #viewport-root {
+      position: absolute;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      touch-action: none;
+      cursor: none; /* Reticle controls pointer */
+    }
+
+    #viewport-root.mode-select { cursor: default; }
+    #viewport-root.mode-lasso { cursor: crosshair; }
+    #viewport-root.is-panning { cursor: grabbing !important; }
+
+    /* Grid background patterns */
+    .bg-grid-dots {
+      background-image: radial-gradient(rgba(255, 255, 255, 0.12) 1.2px, transparent 1.2px);
+      background-size: 28px 28px;
+    }
+    .bg-grid-lines {
+      background-size: 40px 40px;
+      background-image:
+        linear-gradient(to right, rgba(255, 255, 255, 0.05) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(255, 255, 255, 0.05) 1px, transparent 1px);
+    }
+
+    /* Infinite Camera World Layer */
+    #world-layer {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 0;
+      height: 0;
+      transform-origin: 0 0;
+      pointer-events: none;
+      will-change: transform;
+    }
+
+    /* Screen-sized global canvas buffers */
+    .viewport-canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      display: block;
+    }
+    #global-cached-canvas { z-index: 10; }
+    #global-active-canvas { z-index: 50; }
+    #lasso-canvas { z-index: 60; }
+
+    /* Card Containers & Embedded Drawing Canvases */
+    #cards-container {
+      position: absolute;
+      top: 0;
+      left: 0;
+      z-index: 20;
+      pointer-events: none;
+    }
+
+    .ref-card {
+      position: absolute;
+      transform-origin: center center;
+      pointer-events: auto;
+      touch-action: none;
+      border-radius: 6px;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.7);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      transition: outline 0.1s ease, box-shadow 0.1s ease;
+      overflow: visible;
+    }
+
+    .ref-card.selected {
+      outline: 2px solid #3b82f6;
+      box-shadow: 0 0 25px rgba(59, 130, 246, 0.5);
+    }
+
+    .ref-card.lasso-highlight {
+      outline: 2px dashed #60a5fa !important;
+      box-shadow: 0 0 20px rgba(96, 165, 250, 0.5) !important;
+    }
+
+    .ref-card-content {
+      width: 100%;
+      height: 100%;
+      position: relative;
+      border-radius: 6px;
+      overflow: hidden;
+    }
+
+    .ref-card-content img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      pointer-events: none;
+      border-radius: 6px;
+    }
+
+    .card-ink-layer {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      pointer-events: none;
+      z-index: 5;
+    }
+
+    /* Lock note input during draw to avoid soft keyboard popups */
+    .note-editor-area {
+      width: 100%;
+      height: 100%;
+      background: transparent;
+      resize: none;
+      outline: none;
+      font-weight: 500;
+      font-size: 13px;
+      line-height: 1.5;
+      color: #1e293b;
+    }
+
+    .body-mode-draw .note-editor-area {
+      pointer-events: none !important;
+      user-select: none !important;
+      -webkit-user-select: none !important;
+    }
+
+    /* Resize Handles */
+    .resize-handle {
+      position: absolute;
+      width: 14px;
+      height: 14px;
+      background: #3b82f6;
+      border: 2px solid #ffffff;
+      border-radius: 3px;
+      touch-action: none;
+      z-index: 15;
+    }
+    .handle-br { right: -7px; bottom: -7px; cursor: nwse-resize; }
+    .handle-tr { right: -7px; top: -7px; cursor: nesw-resize; }
+    .handle-bl { left: -7px; bottom: -7px; cursor: nesw-resize; }
+    .handle-tl { left: -7px; top: -7px; cursor: nwse-resize; }
+
+    /* Universal Lasso Transform Bounding Box */
+    #lasso-transform-box {
+      position: absolute;
+      border: 2px dashed #60a5fa;
+      background: rgba(59, 130, 246, 0.10);
+      pointer-events: auto;
+      cursor: move;
+      z-index: 70;
+      touch-action: none;
+      display: none;
+    }
+
+    .lasso-handle {
+      position: absolute;
+      width: 13px;
+      height: 13px;
+      background: #ffffff;
+      border: 2.5px solid #2563eb;
+      border-radius: 2px;
+      touch-action: none;
+    }
+    .l-handle-tl { top: -7px; left: -7px; cursor: nwse-resize; }
+    .l-handle-tr { top: -7px; right: -7px; cursor: nesw-resize; }
+    .l-handle-bl { bottom: -7px; left: -7px; cursor: nesw-resize; }
+    .l-handle-br { bottom: -7px; right: -7px; cursor: nwse-resize; }
+
+    /* Reticle Cursor */
+    #tool-reticle {
+      position: fixed;
+      top: 0;
+      left: 0;
+      pointer-events: none;
+      transform: translate(-50%, -50%);
+      border-radius: 50%;
+      z-index: 9999;
+      display: none;
+      will-change: transform, left, top;
+    }
+    #tool-reticle.active-pen {
+      display: block;
+      border: 1.5px solid rgba(255, 255, 255, 0.9);
+      background: rgba(255, 255, 255, 0.08);
+      box-shadow: 0 0 6px rgba(0,0,0,0.6);
+    }
+    #tool-reticle.active-marker {
+      display: block;
+      border: 1.5px dashed rgba(255, 255, 255, 0.85);
+      background: rgba(255, 255, 255, 0.15);
+      box-shadow: 0 0 8px rgba(0,0,0,0.4);
+    }
+    #tool-reticle.active-eraser {
+      display: block;
+      border: 2px dashed #f87171;
+      background: rgba(239, 68, 68, 0.20);
+      box-shadow: 0 0 12px rgba(239, 68, 68, 0.45);
+    }
+    #tool-reticle.active-lasso {
+      display: block;
+      width: 20px !important;
+      height: 20px !important;
+      border: 2px dashed #60a5fa;
+      background: rgba(96, 165, 250, 0.25);
+      box-shadow: 0 0 10px rgba(96, 165, 250, 0.5);
+    }
+    #reticle-dot {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 3px;
+      height: 3px;
+      background: white;
+      border-radius: 50%;
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+    }
+
+    /* Glass UI Bars */
+    .glass-bar {
+      background: var(--panel-bg);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      box-shadow: 0 14px 40px -8px rgba(0, 0, 0, 0.75);
+    }
+
+    /* Toast Notifications */
+    #toast-container {
+      position: fixed;
+      top: 72px;
+      right: 20px;
+      z-index: 99999;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      pointer-events: none;
+    }
+    .toast-msg {
+      background: rgba(18, 20, 26, 0.96);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      border-left: 4px solid #3b82f6;
+      padding: 10px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      color: #f1f5f9;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.6);
+      transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+      transform: translateX(100%);
+      opacity: 0;
+      pointer-events: auto;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .toast-msg.show {
+      transform: translateX(0);
+      opacity: 1;
+    }
+    .toast-msg.success { border-left-color: #10b981; }
+    .toast-msg.error { border-left-color: #ef4444; }
+    .toast-msg.warning { border-left-color: #f59e0b; }
+  </style>
+</head>
+<body class="relative w-screen h-screen overflow-hidden select-none bg-[#121316] body-mode-draw">
+
+  <!-- TOAST NOTIFICATION CONTAINER -->
+  <div id="toast-container"></div>
+
+  <!-- DYNAMIC RETICLE CURSOR -->
+  <div id="tool-reticle">
+    <div id="reticle-dot"></div>
+  </div>
+
+  <!-- TOP HEADER HUD -->
+  <header class="absolute top-3 left-4 right-4 flex items-center justify-between pointer-events-none z-50">
+    <div class="glass-bar rounded-xl px-3.5 py-1.5 flex items-center gap-3 pointer-events-auto">
+      <div class="flex items-center gap-2">
+        <div class="w-6 h-6 rounded-lg bg-gradient-to-tr from-blue-600 to-indigo-500 flex items-center justify-center text-xs font-black shadow-md shadow-blue-500/30 text-white">
+          CR
+        </div>
+        <span class="font-bold text-sm tracking-wide text-zinc-100 hidden sm:inline">CanvasRef</span>
+      </div>
+
+      <div class="h-4 w-[1px] bg-white/10 hidden sm:block"></div>
+      <div id="stat-zoom" class="text-xs text-zinc-400 font-mono">100%</div>
+      <button id="btn-reset-view" title="Reset Camera" class="text-xs text-zinc-400 hover:text-white transition px-2 py-0.5 rounded hover:bg-white/5">
+        Reset
+      </button>
+
+      <!-- Sync Status Badges -->
+      <div class="h-4 w-[1px] bg-white/10 hidden md:block"></div>
+      <div class="hidden md:flex items-center gap-2">
+        <div id="badge-local-sync" title="Local Directory Sync State" class="flex items-center gap-1.5 px-2 py-0.5 rounded bg-zinc-800/80 border border-white/5 text-[11px] text-zinc-400">
+          <span class="w-1.5 h-1.5 rounded-full bg-zinc-500" id="badge-local-dot"></span>
+          <span id="badge-local-text">Local: None</span>
+        </div>
+        <div id="badge-cloud-sync" title="Google Drive Cloud State" class="flex items-center gap-1.5 px-2 py-0.5 rounded bg-zinc-800/80 border border-white/5 text-[11px] text-zinc-400">
+          <span class="w-1.5 h-1.5 rounded-full bg-zinc-500" id="badge-cloud-dot"></span>
+          <span id="badge-cloud-text">Cloud: Offline</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Quick Utilities & Settings -->
+    <div class="glass-bar rounded-xl px-2.5 py-1.5 flex items-center gap-1 pointer-events-auto">
+      <!-- Quick Sync Overwrite Button -->
+      <button id="btn-quick-sync" title="Quick Sync: Overwrites active storage target with current board" class="p-2 text-blue-400 hover:text-blue-300 hover:bg-white/10 rounded-lg transition flex items-center gap-1.5 text-xs font-medium">
+        <i data-lucide="refresh-cw" class="w-4 h-4" id="quick-sync-icon"></i>
+        <span class="hidden lg:inline text-xs">Sync</span>
+      </button>
+
+      <button id="btn-pack-images" title="Pack Images Grid" class="p-2 text-zinc-300 hover:text-white hover:bg-white/10 rounded-lg transition text-xs flex items-center gap-1.5">
+        <i data-lucide="layout-grid" class="w-4 h-4"></i>
+        <span class="hidden md:inline text-xs">Pack</span>
+      </button>
+
+      <button id="btn-toggle-grid" title="Cycle Grid Mode" class="p-2 text-zinc-300 hover:text-white hover:bg-white/10 rounded-lg transition">
+        <i data-lucide="grid" class="w-4 h-4"></i>
+      </button>
+
+      <button id="btn-export-view" title="Export Board to PNG" class="p-2 text-zinc-300 hover:text-white hover:bg-white/10 rounded-lg transition">
+        <i data-lucide="camera" class="w-4 h-4"></i>
+      </button>
+
+      <!-- Settings Button -->
+      <button id="btn-open-settings" title="Settings & Dual Storage Sync (S)" class="p-2 text-zinc-300 hover:text-white hover:bg-white/10 rounded-lg transition relative">
+        <i data-lucide="settings" class="w-4 h-4"></i>
+        <span id="settings-status-pip" class="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-blue-500"></span>
+      </button>
+
+      <button id="btn-open-help" title="Shortcuts & Navigation" class="p-2 text-zinc-400 hover:text-white hover:bg-white/10 rounded-lg transition">
+        <i data-lucide="help-circle" class="w-4 h-4"></i>
+      </button>
+    </div>
+  </header>
+
+  <!-- FLOATING BOTTOM TOOLBAR -->
+  <div class="absolute bottom-5 left-1/2 -translate-x-1/2 flex flex-col items-center gap-2 z-50 pointer-events-auto max-w-[96vw]">
+    
+    <!-- Drawing & Eraser Controls Sub-bar -->
+    <div id="drawing-palette-bar" class="glass-bar px-3 py-1.5 rounded-full flex items-center gap-2.5 border border-white/10 flex-wrap justify-center">
+      <!-- Brush Selector -->
+      <div class="flex items-center gap-1 bg-black/40 rounded-full p-1">
+        <button id="sub-tool-pen" data-tool="pen" title="Solid Pen (P)" class="px-2.5 py-1 text-xs rounded-full bg-blue-600 text-white font-medium flex items-center gap-1 transition">
+          <i data-lucide="pen-tool" class="w-3.5 h-3.5"></i> <span>Pen</span>
+        </button>
+        <button id="sub-tool-marker" data-tool="marker" title="Continuous Marker (H)" class="px-2.5 py-1 text-xs rounded-full text-zinc-400 hover:text-white transition flex items-center gap-1">
+          <i data-lucide="highlighter" class="w-3.5 h-3.5"></i> <span>Marker</span>
+        </button>
+        <button id="sub-tool-eraser" data-tool="eraser" title="Real-Time Eraser (E)" class="px-2.5 py-1 text-xs rounded-full text-zinc-400 hover:text-white transition flex items-center gap-1">
+          <i data-lucide="eraser" class="w-3.5 h-3.5"></i> <span>Eraser</span>
+        </button>
+      </div>
+
+      <!-- Quick Swatches -->
+      <div id="swatches-group" class="flex items-center gap-1.5 px-1 border-l border-r border-white/10">
+        <button class="w-5 h-5 rounded-full bg-red-500 border-2 border-white hover:scale-110 transition swatch-btn" data-color="#ef4444"></button>
+        <button class="w-5 h-5 rounded-full bg-amber-400 border-2 border-transparent hover:scale-110 transition swatch-btn" data-color="#f59e0b"></button>
+        <button class="w-5 h-5 rounded-full bg-emerald-400 border-2 border-transparent hover:scale-110 transition swatch-btn" data-color="#10b981"></button>
+        <button class="w-5 h-5 rounded-full bg-sky-400 border-2 border-transparent hover:scale-110 transition swatch-btn" data-color="#38bdf8"></button>
+        <button class="w-5 h-5 rounded-full bg-white border-2 border-transparent hover:scale-110 transition swatch-btn" data-color="#ffffff"></button>
+        <input type="color" id="custom-color-input" value="#ef4444" class="w-5 h-5 opacity-0 absolute pointer-events-none">
+        <button id="btn-pick-custom" title="Custom Color" class="w-5 h-5 rounded-full border border-zinc-500 flex items-center justify-center text-[9px] hover:border-white">
+          +
+        </button>
+      </div>
+
+      <!-- Size / Radius slider -->
+      <div class="flex items-center gap-2 px-1">
+        <i data-lucide="circle-dot" class="w-3 h-3 text-zinc-400"></i>
+        <input id="brush-size-slider" type="range" min="2" max="80" value="6" class="w-20 accent-blue-500 h-1 bg-zinc-700 rounded-lg cursor-pointer">
+        <span id="brush-size-val" class="text-[11px] font-mono text-zinc-400 w-6 text-right">6px</span>
+      </div>
+
+      <!-- Undo & Clear -->
+      <div class="flex items-center gap-1 border-l border-white/10 pl-2">
+        <button id="btn-undo" title="Undo Stroke (Ctrl+Z)" class="p-1.5 rounded hover:bg-white/10 text-zinc-300">
+          <i data-lucide="undo" class="w-3.5 h-3.5"></i>
+        </button>
+        <button id="btn-clear-ink" title="Clear All Ink Strokes" class="p-1.5 rounded hover:bg-red-500/20 text-zinc-300 hover:text-red-400">
+          <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
+        </button>
+      </div>
+    </div>
+
+    <!-- MAIN DOCK -->
+    <div class="glass-bar px-3 py-2 rounded-2xl flex items-center gap-1.5 sm:gap-2 border border-white/10 shadow-2xl">
+      <!-- Select / Pan / Move (V) -->
+      <button id="tool-select" title="Select & Move (V)" class="p-2.5 rounded-xl text-zinc-300 hover:text-white hover:bg-white/10 flex items-center gap-1.5 transition">
+        <i data-lucide="pointer" class="w-4 h-4"></i>
+        <span class="text-xs hidden sm:inline">Select (V)</span>
+      </button>
+
+      <!-- Draw Tool (P) -->
+      <button id="tool-draw" title="Draw Mode (P)" class="p-2.5 rounded-xl bg-blue-600 text-white font-medium flex items-center gap-1.5 transition shadow-lg shadow-blue-500/25">
+        <i data-lucide="pen-tool" class="w-4 h-4"></i>
+        <span class="text-xs hidden sm:inline">Draw (P)</span>
+      </button>
+
+      <!-- Universal Lasso Select Tool (L) -->
+      <button id="tool-lasso" title="Universal Lasso (L): Circle strokes, notes, or images to move & delete together" class="p-2.5 rounded-xl text-zinc-300 hover:text-white hover:bg-white/10 flex items-center gap-1.5 transition">
+        <i data-lucide="lasso" class="w-4 h-4"></i>
+        <span class="text-xs hidden sm:inline">Lasso (L)</span>
+      </button>
+
+      <div class="h-5 w-[1px] bg-white/15 my-auto"></div>
+
+      <!-- Add Image -->
+      <label for="file-image-input" title="Add Image (or Ctrl+V to paste)" class="p-2.5 rounded-xl text-zinc-300 hover:text-white hover:bg-white/10 cursor-pointer flex items-center gap-1.5 transition">
+        <i data-lucide="image-plus" class="w-4 h-4"></i>
+        <span class="text-xs hidden sm:inline">Add Image</span>
+      </label>
+      <input type="file" id="file-image-input" accept="image/*" multiple class="hidden">
+
+      <!-- Sticky Note -->
+      <button id="btn-add-note" title="Sticky Note (N)" class="p-2.5 rounded-xl text-zinc-300 hover:text-white hover:bg-white/10 flex items-center gap-1.5 transition">
+        <i data-lucide="sticky-note" class="w-4 h-4"></i>
+        <span class="text-xs hidden sm:inline">Note (N)</span>
+      </button>
+
+      <div class="h-5 w-[1px] bg-white/15 my-auto"></div>
+
+      <!-- Stylus Palm Rejection Toggle -->
+      <button id="btn-stylus-palm-toggle" title="Stylus Palm Rejection. ON: stylus draws, touch pans. OFF: all inputs draw." class="p-2 rounded-xl text-zinc-400 hover:text-white hover:bg-white/10 flex items-center gap-1.5 border border-white/5 transition">
+        <i data-lucide="tablet" class="w-4 h-4"></i>
+        <span id="stylus-status-txt" class="text-[11px] font-mono hidden md:inline">Stylus Only: OFF</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- CONTEXT SELECTION TOOLBAR FOR CARDS -->
+  <div id="selection-bar" class="hidden absolute top-20 left-1/2 -translate-x-1/2 glass-bar rounded-xl px-2.5 py-1.5 flex items-center gap-2 z-40 border border-blue-500/30 shadow-2xl">
+    <button id="btn-flip-h" title="Flip Horizontal" class="p-1.5 rounded-lg hover:bg-white/10 text-zinc-300 hover:text-white">
+      <i data-lucide="flip-horizontal" class="w-4 h-4"></i>
+    </button>
+    <button id="btn-flip-v" title="Flip Vertical" class="p-1.5 rounded-lg hover:bg-white/10 text-zinc-300 hover:text-white">
+      <i data-lucide="flip-vertical" class="w-4 h-4"></i>
+    </button>
+    <button id="btn-rot-cw" title="Rotate 90°" class="p-1.5 rounded-lg hover:bg-white/10 text-zinc-300 hover:text-white">
+      <i data-lucide="rotate-cw" class="w-4 h-4"></i>
+    </button>
+    <div class="h-4 w-[1px] bg-white/10"></div>
+    <div class="flex items-center gap-1 px-1">
+      <i data-lucide="eye" class="w-3.5 h-3.5 text-zinc-400"></i>
+      <input id="item-opacity" type="range" min="10" max="100" value="100" class="w-16 accent-blue-500 h-1 bg-zinc-700 rounded-lg">
+    </div>
+    <div class="h-4 w-[1px] bg-white/10"></div>
+    <button id="btn-bring-top" title="Bring to Front" class="p-1.5 rounded-lg hover:bg-white/10 text-zinc-300 hover:text-white">
+      <i data-lucide="bring-to-front" class="w-4 h-4"></i>
+    </button>
+    <button id="btn-delete-item" title="Delete Card (Del)" class="p-1.5 rounded-lg hover:bg-red-500/20 text-red-400 hover:text-red-300">
+      <i data-lucide="trash" class="w-4 h-4"></i>
+    </button>
+  </div>
+
+  <!-- UNIVERSAL LASSO FLOATING ACTION BAR -->
+  <div id="lasso-action-bar" class="hidden absolute top-20 left-1/2 -translate-x-1/2 glass-bar rounded-xl px-3 py-1.5 flex items-center gap-2 z-40 border border-blue-500/40 shadow-2xl">
+    <span class="text-xs text-blue-400 font-medium px-1 flex items-center gap-1">
+      <i data-lucide="check-circle" class="w-3.5 h-3.5"></i>
+      <span id="lasso-count-txt">0 Items Selected</span>
+    </span>
+    <div class="h-4 w-[1px] bg-white/10"></div>
+    <button id="btn-lasso-delete" title="Delete Selected Items" class="p-1.5 rounded-lg hover:bg-red-500/20 text-red-400 hover:text-red-300 flex items-center gap-1 text-xs">
+      <i data-lucide="trash" class="w-3.5 h-3.5"></i> Delete
+    </button>
+    <button id="btn-lasso-commit" title="Commit Changes (or Esc)" class="px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold">
+      Done
+    </button>
+  </div>
+
+  <!-- ======================================================== -->
+  <!-- SETTINGS MODAL: DUAL STORAGE (LOCAL & GOOGLE DRIVE SYNC) -->
+  <!-- ======================================================== -->
+  <div id="settings-modal" class="hidden fixed inset-0 z-50 bg-black/70 backdrop-blur-md flex items-center justify-center p-4">
+    <div class="glass-bar max-w-2xl w-full rounded-2xl border border-white/15 shadow-2xl overflow-hidden flex flex-col max-h-[88vh]">
+      
+      <!-- Modal Header -->
+      <div class="px-6 py-4 border-b border-white/10 flex items-center justify-between">
+        <div class="flex items-center gap-2.5">
+          <div class="w-8 h-8 rounded-xl bg-blue-600/20 border border-blue-500/40 flex items-center justify-center text-blue-400">
+            <i data-lucide="sliders" class="w-4 h-4"></i>
+          </div>
+          <div>
+            <h3 class="font-bold text-base text-white">Storage & Sync Settings</h3>
+            <p class="text-xs text-zinc-400">Configure Local System Directory & Google Drive Cloud Sync</p>
+          </div>
+        </div>
+        <button id="btn-close-settings" class="text-zinc-400 hover:text-white p-1.5 rounded-lg hover:bg-white/10 transition">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+
+      <!-- Settings Tabs -->
+      <div class="flex border-b border-white/10 bg-black/20 px-6 pt-2 gap-4">
+        <button id="tab-btn-storage" class="pb-3 text-xs font-semibold text-blue-400 border-b-2 border-blue-500 flex items-center gap-2 transition">
+          <i data-lucide="folder-sync" class="w-4 h-4"></i> Sync Targets
+        </button>
+        <button id="tab-btn-cloud" class="pb-3 text-xs font-medium text-zinc-400 hover:text-zinc-200 border-b-2 border-transparent flex items-center gap-2 transition">
+          <i data-lucide="cloud" class="w-4 h-4"></i> Google Drive Cloud
+        </button>
+        <button id="tab-btn-general" class="pb-3 text-xs font-medium text-zinc-400 hover:text-zinc-200 border-b-2 border-transparent flex items-center gap-2 transition">
+          <i data-lucide="sliders-horizontal" class="w-4 h-4"></i> Preferences
+        </button>
+      </div>
+
+      <!-- Tab Content Area -->
+      <div class="p-6 overflow-y-auto space-y-6 text-xs text-zinc-300">
+        
+        <!-- TAB 1: SYNC TARGETS & OVERWRITE ACTIONS -->
+        <div id="tab-panel-storage" class="space-y-6">
+          
+          <!-- Local System Directory Section -->
+          <div class="bg-white/5 border border-white/10 rounded-xl p-4 space-y-3">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-2">
+                <i data-lucide="hard-drive" class="w-4 h-4 text-emerald-400"></i>
+                <span class="font-semibold text-zinc-100 text-sm">Local System Directory</span>
+              </div>
+              <span id="local-api-support-tag" class="text-[10px] px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-300 font-mono">
+                File System Access Ready
+              </span>
+            </div>
+
+            <p class="text-zinc-400 leading-relaxed">
+              Connect a dedicated folder on your PC or tablet. Once connected, saving will directly overwrite the board file in that folder without repeatedly showing file download dialogs.
+            </p>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+              <div>
+                <label class="block text-[11px] text-zinc-400 font-medium mb-1">Target Board Filename</label>
+                <input id="input-local-filename" type="text" value="canvasref_board.crf" class="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-blue-500 font-mono">
+              </div>
+              <div>
+                <label class="block text-[11px] text-zinc-400 font-medium mb-1">Active Folder Location</label>
+                <div id="local-folder-display" class="bg-black/30 border border-white/5 rounded-lg px-3 py-1.5 text-xs text-zinc-400 truncate font-mono">
+                  No directory selected
+                </div>
+              </div>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-2 pt-2">
+              <button id="btn-pick-local-dir" class="px-3.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-white rounded-lg transition font-medium flex items-center gap-1.5 border border-white/10">
+                <i data-lucide="folder-open" class="w-3.5 h-3.5 text-amber-400"></i>
+                <span>Select Folder</span>
+              </button>
+
+              <button id="btn-save-local-now" class="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg transition font-medium flex items-center gap-1.5 shadow-lg shadow-emerald-600/20">
+                <i data-lucide="save" class="w-3.5 h-3.5"></i>
+                <span>Save / Overwrite Local</span>
+              </button>
+
+              <button id="btn-fetch-local-now" class="px-3.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg transition font-medium flex items-center gap-1.5 border border-white/10">
+                <i data-lucide="download" class="w-3.5 h-3.5 text-blue-400"></i>
+                <span>Fetch from Local</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Google Drive Cloud Sync Section -->
+          <div class="bg-white/5 border border-white/10 rounded-xl p-4 space-y-3">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-2">
+                <i data-lucide="cloud" class="w-4 h-4 text-blue-400"></i>
+                <span class="font-semibold text-zinc-100 text-sm">Google Drive Cloud Storage</span>
+              </div>
+              <div class="flex items-center gap-1.5">
+                <span id="gdrive-status-pill" class="text-[10px] px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 font-mono flex items-center gap-1">
+                  <span class="w-1.5 h-1.5 rounded-full bg-zinc-500" id="gdrive-pill-dot"></span>
+                  <span id="gdrive-pill-text">Disconnected</span>
+                </span>
+              </div>
+            </div>
+
+            <p class="text-zinc-400 leading-relaxed">
+              When saving to the cloud, CanvasRef overwrites the existing cloud board file in your Google Drive. Fetching downloads that cloud file and updates your active workspace.
+            </p>
+
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+              <div>
+                <label class="block text-[11px] text-zinc-400 font-medium mb-1">Cloud File Name</label>
+                <input id="input-cloud-filename" type="text" value="canvasref_cloud_board.crf" class="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-blue-500 font-mono">
+              </div>
+              <div>
+                <label class="block text-[11px] text-zinc-400 font-medium mb-1">Google Drive Folder ID (Optional)</label>
+                <input id="input-cloud-folder-id" type="text" placeholder="root or specific folder ID" class="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-blue-500 font-mono">
+              </div>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-2 pt-2">
+              <button id="btn-save-cloud-now" class="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg transition font-medium flex items-center gap-1.5 shadow-lg shadow-blue-600/20">
+                <i data-lucide="cloud-upload" class="w-3.5 h-3.5"></i>
+                <span>Save / Overwrite Cloud</span>
+              </button>
+
+              <button id="btn-fetch-cloud-now" class="px-3.5 py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded-lg transition font-medium flex items-center gap-1.5 border border-white/10">
+                <i data-lucide="cloud-download" class="w-3.5 h-3.5 text-sky-400"></i>
+                <span>Fetch from Cloud</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Quick Synchronize Logic Info -->
+          <div class="bg-blue-500/10 border border-blue-500/20 rounded-xl p-3 flex items-start gap-3">
+            <i data-lucide="info" class="w-4 h-4 text-blue-400 mt-0.5 shrink-0"></i>
+            <div class="text-[11px] text-zinc-300 leading-normal">
+              <strong>Bidirectional Overwrite Rule:</strong> When you hit <em>Save / Overwrite</em>, the destination file (Local or Cloud) is updated to match your live canvas. When you hit <em>Fetch</em>, the file from storage replaces your current board.
+            </div>
+          </div>
+        </div>
+
+        <!-- TAB 2: GOOGLE DRIVE API CREDENTIALS / DEMO MODE -->
+        <div id="tab-panel-cloud" class="hidden space-y-4">
+          <div class="bg-white/5 border border-white/10 rounded-xl p-4 space-y-3">
+            <h4 class="font-semibold text-zinc-100 text-sm flex items-center gap-2">
+              <i data-lucide="key" class="w-4 h-4 text-amber-400"></i> Google Identity / OAuth Settings
+            </h4>
+            <p class="text-zinc-400 leading-relaxed">
+              To connect real Google Drive, enter your Google Cloud OAuth Client ID (or use the built-in Sandbox / Mock Cloud Drive for testing offline).
+            </p>
+
+            <div class="space-y-3 pt-1">
+              <div>
+                <label class="block text-[11px] text-zinc-400 font-medium mb-1">Google OAuth Client ID</label>
+                <input id="input-gdrive-client-id" type="text" placeholder="xxxxxxxxxx.apps.googleusercontent.com" class="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-blue-500 font-mono">
+              </div>
+              <div>
+                <label class="block text-[11px] text-zinc-400 font-medium mb-1">Google API Key (Optional)</label>
+                <input id="input-gdrive-api-key" type="password" placeholder="AIzaSy..." class="w-full bg-black/40 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-blue-500 font-mono">
+              </div>
+            </div>
+
+            <!-- OAuth Sign-In or Demo Toggle -->
+            <div class="flex flex-wrap items-center gap-3 pt-2">
+              <button id="btn-gdrive-auth-toggle" class="px-4 py-2 bg-white text-zinc-900 hover:bg-zinc-100 rounded-xl font-bold flex items-center gap-2 transition text-xs shadow-md">
+                <svg class="w-4 h-4" viewBox="0 0 24 24">
+                  <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+                  <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+                  <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+                  <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+                </svg>
+                <span id="gdrive-auth-btn-text">Connect with Google</span>
+              </button>
+
+              <!-- Mock sandbox cloud mode for quick offline tests -->
+              <button id="btn-use-mock-cloud" class="px-3.5 py-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-xl transition text-xs border border-white/10 flex items-center gap-1.5">
+                <i data-lucide="test-tube-2" class="w-3.5 h-3.5 text-purple-400"></i>
+                <span id="mock-cloud-btn-text">Enable Sandbox Mock Cloud</span>
+              </button>
+            </div>
+
+            <!-- Setup Instructions Accordion -->
+            <details class="text-[11px] text-zinc-400 bg-black/30 p-3 rounded-lg border border-white/5 cursor-pointer mt-2">
+              <summary class="font-semibold text-zinc-300 select-none">How to get your free Google Drive Client ID</summary>
+              <div class="space-y-1.5 pt-2 pl-2 border-l border-white/10 mt-2">
+                <p>1. Go to <a href="https://console.cloud.google.com" target="_blank" class="text-blue-400 underline">Google Cloud Console</a>.</p>
+                <p>2. Create a Project, then enable the <strong>Google Drive API</strong>.</p>
+                <p>3. Under <strong>OAuth consent screen</strong>, select External and add your email as a test user.</p>
+                <p>4. Go to <strong>Credentials</strong> → <em>Create Credentials</em> → <em>OAuth Client ID</em> (Web application).</p>
+                <p>5. Add your current website URL or <code>http://localhost</code> to <strong>Authorized JavaScript origins</strong>.</p>
+                <p>6. Paste the generated Client ID above.</p>
+              </div>
+            </details>
+          </div>
+        </div>
+
+        <!-- TAB 3: GENERAL PREFERENCES -->
+        <div id="tab-panel-general" class="hidden space-y-4">
+          <div class="bg-white/5 border border-white/10 rounded-xl p-4 space-y-4">
+            <h4 class="font-semibold text-zinc-100 text-sm">Application Preferences</h4>
+
+            <!-- Auto-Sync toggle -->
+            <div class="flex items-center justify-between">
+              <div>
+                <div class="font-medium text-zinc-200">Auto-Save to Active Target</div>
+                <div class="text-[11px] text-zinc-400">Silently overwrite local file or cloud every 2 minutes when changes occur</div>
+              </div>
+              <input type="checkbox" id="pref-auto-sync-toggle" class="w-4 h-4 accent-blue-500 rounded cursor-pointer">
+            </div>
+
+            <!-- Default sync destination -->
+            <div class="flex items-center justify-between pt-2 border-t border-white/10">
+              <div>
+                <div class="font-medium text-zinc-200">Default Quick-Sync Target</div>
+                <div class="text-[11px] text-zinc-400">Which target to update when clicking the Quick Sync button in the top bar</div>
+              </div>
+              <select id="pref-default-sync-target" class="bg-black/40 border border-white/10 rounded-lg px-2.5 py-1 text-xs text-white">
+                <option value="local">Local System Folder</option>
+                <option value="cloud">Google Drive Cloud</option>
+                <option value="both">Both (Local & Cloud)</option>
+              </select>
+            </div>
+
+            <!-- Local storage manual backup / export -->
+            <div class="pt-3 border-t border-white/10 flex items-center justify-between">
+              <div>
+                <div class="font-medium text-zinc-200">Manual JSON Backup</div>
+                <div class="text-[11px] text-zinc-400">Download or upload board file directly from disk</div>
+              </div>
+              <div class="flex gap-2">
+                <button id="btn-download-json-fallback" class="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg text-xs font-medium border border-white/10">
+                  Export JSON
+                </button>
+                <label for="file-json-upload" class="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-lg text-xs font-medium border border-white/10 cursor-pointer">
+                  Import JSON
+                </label>
+                <input type="file" id="file-json-upload" accept=".json,.crf" class="hidden">
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Modal Footer -->
+      <div class="px-6 py-3 border-t border-white/10 bg-black/40 flex items-center justify-between">
+        <span id="sync-last-saved-time" class="text-[11px] text-zinc-500 font-mono">Last saved: Never</span>
+        <button id="btn-save-settings-close" class="px-4 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold transition">
+          Done
+        </button>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- HELP MODAL -->
+  <div id="help-dialog" class="hidden fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+    <div class="glass-bar max-w-md w-full rounded-2xl p-6 border border-white/10 shadow-2xl space-y-4">
+      <div class="flex items-center justify-between pb-2 border-b border-white/10">
+        <h3 class="font-bold text-base text-white flex items-center gap-2">
+          <i data-lucide="sparkles" class="w-4 h-4 text-blue-400"></i> PureRef Navigation & Features
+        </h3>
+        <button id="btn-close-help" class="text-zinc-400 hover:text-white p-1 rounded-lg">
+          <i data-lucide="x" class="w-5 h-5"></i>
+        </button>
+      </div>
+
+      <div class="space-y-3 text-xs text-zinc-300 leading-relaxed max-h-[60vh] overflow-y-auto pr-1">
+        <div class="bg-white/5 p-3 rounded-xl border border-white/5 space-y-1">
+          <div class="font-semibold text-blue-400">Navigation (PureRef style):</div>
+          <p>• <strong>Pan:</strong> Right-Click drag, Middle-Click drag, or <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700">Space</kbd> + Left-Click drag anytime.</p>
+          <p>• <strong>Zoom:</strong> Scroll wheel centered on cursor, or two-finger pinch on tablet.</p>
+          <p>• <strong>Paste:</strong> Press <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700">Ctrl+V</kbd> to paste clipboard screenshots.</p>
+        </div>
+
+        <div class="bg-white/5 p-3 rounded-xl border border-white/5 space-y-1">
+          <div class="font-semibold text-emerald-400">Per-Object Drawing & Layering:</div>
+          <p>• <strong>True Z-Stacking:</strong> Strokes drawn on an image or note are embedded on that object's local canvas. Placing another card over it naturally covers the drawing!</p>
+          <p>• <strong>Draw Without Text Interruption:</strong> Notes never trigger text editing while in Draw mode. Switch to Select Mode (<kbd class="px-1 py-0.5 bg-zinc-800 rounded">V</kbd>) to type notes.</p>
+          <p>• <strong>Continuous Marker:</strong> Silky flat highlighter with zero overlapping disc artifacts.</p>
+          <p>• <strong>Universal Lasso:</strong> Circle strokes, images, and notes together to move or delete as one cluster.</p>
+        </div>
+
+        <div class="bg-white/5 p-3 rounded-xl border border-white/5 space-y-1">
+          <div class="font-semibold text-amber-400">Dual Storage & Cloud Sync:</div>
+          <p>• Press <kbd class="px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700">S</kbd> to open Settings.</p>
+          <p>• Pick a dedicated directory on your PC or tablet for single-click local folder overwrite.</p>
+          <p>• Connect Google Drive or enable Mock Sandbox Cloud for instant bidirectional cloud sync.</p>
+        </div>
+      </div>
+
+      <div class="flex justify-end pt-2">
+        <button id="btn-close-help-confirm" class="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold">
+          Got it!
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- APPLICATION VIEWPORT -->
+  <div id="viewport-root" class="bg-grid-dots">
+    <!-- Floor canvas for freeboard sketches -->
+    <canvas id="global-cached-canvas" class="viewport-canvas"></canvas>
+
+    <!-- Transformed Board World Layer -->
+    <div id="world-layer">
+      <div id="cards-container"></div>
+      
+      <!-- Interactive Universal Lasso Transform Box -->
+      <div id="lasso-transform-box">
+        <div class="lasso-handle l-handle-tl" data-handle="tl"></div>
+        <div class="lasso-handle l-handle-tr" data-handle="tr"></div>
+        <div class="lasso-handle l-handle-bl" data-handle="bl"></div>
+        <div class="lasso-handle l-handle-br" data-handle="br"></div>
+      </div>
+    </div>
+
+    <!-- Active live stroke & Lasso screen overlay buffers -->
+    <canvas id="global-active-canvas" class="viewport-canvas"></canvas>
+    <canvas id="lasso-canvas" class="viewport-canvas"></canvas>
+  </div>
+
+  <script>
+    /**
+     * CanvasRef - High Performance Reference & Drawing Board
+     * Includes Settings Modal with Dual-Storage System (Local Folder & Google Drive Cloud Sync)
+     */
+    (() => {
+      // 1. STATE DEFINITION
+      const state = {
+        toolMode: 'draw',     // 'draw' | 'select' | 'lasso'
+        drawTool: 'pen',      // 'pen' | 'marker' | 'eraser'
+        brushColor: '#ef4444',
+        brushSize: 6,
+        stylusOnly: false,
+        gridMode: 'dots',
+
+        // Viewport Camera
+        panX: window.innerWidth / 2,
+        panY: window.innerHeight / 2,
+        zoom: 1.0,
+        minZoom: 0.05,
+        maxZoom: 12.0,
+
+        // Strokes
+        strokes: [],
+        activeStroke: null,
+        lastDrawnIndex: 0,
+
+        // Universal Lasso
+        lassoLoop: [],
+        selectedStrokes: [],
+        selectedItems: [],
+        lassoBox: null,
+
+        // Reference Cards & Notes
+        items: [],
+        selectedItemId: null,
+        highestZ: 100,
+
+        // Navigation
+        isPanning: false,
+        lastPanX: 0,
+        lastPanY: 0,
+        spacePressed: false,
+
+        // Storage & Cloud Synchronization Config
+        storage: {
+          localDirHandle: null,
+          localFolderName: null,
+          localFileName: 'canvasref_board.crf',
+          
+          gdriveClientId: '',
+          gdriveApiKey: '',
+          gdriveFolderId: '',
+          gdriveFileName: 'canvasref_cloud_board.crf',
+          gdriveConnected: false,
+          gdriveToken: null,
+          gdriveFileId: null, // Track existing file id on Drive for instant overwrite
+
+          mockCloudEnabled: false,
+          mockCloudData: null,
+
+          autoSync: false,
+          defaultSyncTarget: 'local', // 'local' | 'cloud' | 'both'
+          lastSavedTime: null,
+          hasUnsavedChanges: false
+        }
+      };
+
+      // 2. DOM ELEMENTS
+      const viewport = document.getElementById('viewport-root');
+      const worldLayer = document.getElementById('world-layer');
+      const cardsContainer = document.getElementById('cards-container');
+
+      const globalCachedCanvas = document.getElementById('global-cached-canvas');
+      const globalCachedCtx = globalCachedCanvas.getContext('2d', { alpha: true });
+
+      const globalActiveCanvas = document.getElementById('global-active-canvas');
+      const globalActiveCtx = globalActiveCanvas.getContext('2d', { alpha: true });
+
+      const lassoCanvas = document.getElementById('lasso-canvas');
+      const lassoCtx = lassoCanvas.getContext('2d', { alpha: true });
+
+      const toolReticle = document.getElementById('tool-reticle');
+      const lassoTransformBox = document.getElementById('lasso-transform-box');
+      const lassoActionBar = document.getElementById('lasso-action-bar');
+      const lassoCountTxt = document.getElementById('lasso-count-txt');
+
+      const statZoom = document.getElementById('stat-zoom');
+      const selectionBar = document.getElementById('selection-bar');
+      const paletteBar = document.getElementById('drawing-palette-bar');
+
+      // 3. TOAST NOTIFICATION UTILITY
+      function showToast(message, type = 'info', duration = 3500) {
+        const container = document.getElementById('toast-container');
+        const toast = document.createElement('div');
+        toast.className = `toast-msg ${type}`;
+
+        let iconName = 'info';
+        if (type === 'success') iconName = 'check-circle';
+        if (type === 'error') iconName = 'alert-triangle';
+        if (type === 'warning') iconName = 'alert-circle';
+
+        toast.innerHTML = `
+          <i data-lucide="${iconName}" class="w-4 h-4 shrink-0"></i>
+          <span>${message}</span>
+        `;
+        container.appendChild(toast);
+        lucide.createIcons();
+
+        setTimeout(() => toast.classList.add('show'), 10);
+        setTimeout(() => {
+          toast.classList.remove('show');
+          setTimeout(() => toast.remove(), 300);
+        }, duration);
+      }
+
+      // 4. CANVAS BUFFER SIZING
+      let dpr = window.devicePixelRatio || 1;
+      let viewWidth = window.innerWidth;
+      let viewHeight = window.innerHeight;
+
+      function resizeCanvases() {
+        dpr = window.devicePixelRatio || 1;
+        viewWidth = window.innerWidth;
+        viewHeight = window.innerHeight;
+
+        [globalCachedCanvas, globalActiveCanvas, lassoCanvas].forEach(cnv => {
+          cnv.width = viewWidth * dpr;
+          cnv.height = viewHeight * dpr;
+          cnv.style.width = viewWidth + 'px';
+          cnv.style.height = viewHeight + 'px';
+        });
+
+        state.items.forEach(resizeCardCanvas);
+        requestCachedRepaint();
+        updateReticleSize();
+      }
+      window.addEventListener('resize', resizeCanvases);
+
+      // 5. COORDINATE CONVERSIONS
+      function screenToWorld(sx, sy) {
+        return {
+          x: (sx - state.panX) / state.zoom,
+          y: (sy - state.panY) / state.zoom
+        };
+      }
+
+      function worldToScreen(wx, wy) {
+        return {
+          x: wx * state.zoom + state.panX,
+          y: wy * state.zoom + state.panY
+        };
+      }
+
+      function updateWorldTransform() {
+        worldLayer.style.transform = `translate(${state.panX}px, ${state.panY}px) scale(${state.zoom})`;
+        statZoom.textContent = `${Math.round(state.zoom * 100)}%`;
+        updateReticleSize();
+        if (state.lassoBox) updateLassoBoxDOM();
+      }
+
+      function computeStrokeBBox(stroke) {
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        const pad = (stroke.size || 4) * 2;
+        for (let i = 0; i < stroke.points.length; i++) {
+          const pt = stroke.points[i];
+          if (pt.x < minX) minX = pt.x;
+          if (pt.y < minY) minY = pt.y;
+          if (pt.x > maxX) maxX = pt.x;
+          if (pt.y > maxY) maxY = pt.y;
+        }
+        stroke.bbox = {
+          minX: minX - pad,
+          minY: minY - pad,
+          maxX: maxX + pad,
+          maxY: maxY + pad
+        };
+      }
+
+      function getItemAtWorld(wx, wy) {
+        const sorted = [...state.items].sort((a, b) => (b.zIndex || 0) - (a.zIndex || 0));
+        for (const it of sorted) {
+          if (wx >= it.x && wx <= it.x + it.width && wy >= it.y && wy <= it.y + it.height) {
+            return it;
+          }
+        }
+        return null;
+      }
+
+      // 6. DYNAMIC RETICLE CURSOR
+      function updateReticlePos(clientX, clientY) {
+        toolReticle.style.left = `${clientX}px`;
+        toolReticle.style.top = `${clientY}px`;
+      }
+
+      function updateReticleSize() {
+        if (state.toolMode === 'select') {
+          toolReticle.style.display = 'none';
+          return;
+        }
+
+        if (state.toolMode === 'lasso') {
+          toolReticle.style.display = 'block';
+          toolReticle.className = 'active-lasso';
+          return;
+        }
+
+        const screenDiameter = Math.max(8, state.brushSize * state.zoom);
+        toolReticle.style.width = `${screenDiameter}px`;
+        toolReticle.style.height = `${screenDiameter}px`;
+        toolReticle.style.display = 'block';
+
+        toolReticle.className = '';
+        if (state.drawTool === 'pen') {
+          toolReticle.classList.add('active-pen');
+        } else if (state.drawTool === 'marker') {
+          toolReticle.classList.add('active-marker');
+        } else if (state.drawTool === 'eraser') {
+          toolReticle.classList.add('active-eraser');
+        }
+      }
+
+      // 7. DRAWING VECTOR ENGINE
+      function drawVectorStroke(ctx, stroke, coordTransformFn) {
+        const pts = stroke.points;
+        if (!pts || pts.length === 0) return;
+
+        ctx.save();
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+
+        if (stroke.tool === 'marker') {
+          ctx.globalCompositeOperation = 'source-over';
+          ctx.globalAlpha = 0.38;
+          ctx.strokeStyle = stroke.color;
+          ctx.fillStyle = stroke.color;
+          ctx.lineWidth = Math.max(2, stroke.size);
+
+          ctx.beginPath();
+          for (let j = 0; j < pts.length; j++) {
+            const pt = coordTransformFn ? coordTransformFn(pts[j]) : pts[j];
+            if (j === 0) ctx.moveTo(pt.x, pt.y);
+            else ctx.lineTo(pt.x, pt.y);
+          }
+          if (pts.length === 1) {
+            const p = coordTransformFn ? coordTransformFn(pts[0]) : pts[0];
+            ctx.arc(p.x, p.y, stroke.size / 2, 0, Math.PI * 2);
+            ctx.fill();
+          } else {
+            ctx.stroke();
+          }
+        } else {
+          ctx.globalCompositeOperation = 'source-over';
+          ctx.globalAlpha = 1.0;
+          ctx.strokeStyle = stroke.color;
+          ctx.fillStyle = stroke.color;
+
+          if (pts.length === 1) {
+            const p = coordTransformFn ? coordTransformFn(pts[0]) : pts[0];
+            const radius = Math.max(1.5, (stroke.size * (pts[0].pressure || 0.5)) / 2);
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
+            ctx.fill();
+          } else {
+            for (let j = 1; j < pts.length; j++) {
+              const p1 = coordTransformFn ? coordTransformFn(pts[j - 1]) : pts[j - 1];
+              const p2 = coordTransformFn ? coordTransformFn(pts[j]) : pts[j];
+
+              ctx.lineWidth = Math.max(1, stroke.size * ((pts[j].pressure || 0.5) * 1.5));
+              ctx.beginPath();
+              ctx.moveTo(p1.x, p1.y);
+              ctx.lineTo(p2.x, p2.y);
+              ctx.stroke();
+            }
+          }
+        }
+        ctx.restore();
+      }
+
+      // Multi-Layer Repaint
+      let repaintRAF = null;
+      function requestCachedRepaint() {
+        if (repaintRAF) return;
+        repaintRAF = requestAnimationFrame(() => {
+          repaintRAF = null;
+          renderAllCachedLayers();
+        });
+      }
+
+      function renderAllCachedLayers() {
+        globalCachedCtx.save();
+        globalCachedCtx.setTransform(1, 0, 0, 1, 0, 0);
+        globalCachedCtx.clearRect(0, 0, globalCachedCanvas.width, globalCachedCanvas.height);
+        globalCachedCtx.restore();
+
+        globalCachedCtx.save();
+        globalCachedCtx.scale(dpr, dpr);
+
+        const freeStrokes = state.strokes.filter(s => !s.parentId);
+        for (const stroke of freeStrokes) {
+          drawVectorStroke(globalCachedCtx, stroke, (pt) => worldToScreen(pt.x, pt.y));
+        }
+        globalCachedCtx.restore();
+
+        state.items.forEach(renderCardLocalCanvas);
+      }
+
+      function renderCardLocalCanvas(item) {
+        const cardEl = document.getElementById(item.id);
+        if (!cardEl) return;
+        const cnv = cardEl.querySelector('.card-ink-layer');
+        if (!cnv) return;
+        const ctx = cnv.getContext('2d');
+
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, cnv.width, cnv.height);
+        ctx.restore();
+
+        const cardStrokes = state.strokes.filter(s => s.parentId === item.id);
+        if (cardStrokes.length === 0) return;
+
+        ctx.save();
+        ctx.scale(dpr, dpr);
+
+        for (const stroke of cardStrokes) {
+          drawVectorStroke(ctx, stroke, (pt) => ({
+            x: pt.x - item.x,
+            y: pt.y - item.y
+          }));
+        }
+        ctx.restore();
+      }
+
+      function resizeCardCanvas(item) {
+        const cardEl = document.getElementById(item.id);
+        if (!cardEl) return;
+        const cnv = cardEl.querySelector('.card-ink-layer');
+        if (!cnv) return;
+        cnv.width = item.width * dpr;
+        cnv.height = item.height * dpr;
+        cnv.style.width = item.width + 'px';
+        cnv.style.height = item.height + 'px';
+        renderCardLocalCanvas(item);
+      }
+
+      function flushIncrementalActiveStroke() {
+        if (!state.activeStroke) return;
+        const pts = state.activeStroke.points;
+        const stroke = state.activeStroke;
+
+        if (stroke.tool === 'marker') {
+          clearGlobalActiveCanvas();
+          globalActiveCtx.save();
+          globalActiveCtx.scale(dpr, dpr);
+          drawVectorStroke(globalActiveCtx, stroke, (pt) => worldToScreen(pt.x, pt.y));
+          globalActiveCtx.restore();
+          state.lastDrawnIndex = pts.length - 1;
+          return;
+        }
+
+        const start = state.lastDrawnIndex;
+        if (start >= pts.length) return;
+
+        globalActiveCtx.save();
+        globalActiveCtx.scale(dpr, dpr);
+        globalActiveCtx.lineCap = 'round';
+        globalActiveCtx.lineJoin = 'round';
+        globalActiveCtx.strokeStyle = stroke.color;
+        globalActiveCtx.fillStyle = stroke.color;
+
+        if (start === 0 && pts.length === 1) {
+          const pt = worldToScreen(pts[0].x, pts[0].y);
+          const radius = Math.max(1.5, (stroke.size * state.zoom * (pts[0].pressure || 0.5)) / 2);
+          globalActiveCtx.beginPath();
+          globalActiveCtx.arc(pt.x, pt.y, radius, 0, Math.PI * 2);
+          globalActiveCtx.fill();
+          state.lastDrawnIndex = 1;
+        } else {
+          for (let i = Math.max(1, start); i < pts.length; i++) {
+            const p1 = worldToScreen(pts[i - 1].x, pts[i - 1].y);
+            const p2 = worldToScreen(pts[i].x, pts[i].y);
+            globalActiveCtx.lineWidth = Math.max(1, stroke.size * state.zoom * ((pts[i].pressure || 0.5) * 1.5));
+            globalActiveCtx.beginPath();
+            globalActiveCtx.moveTo(p1.x, p1.y);
+            globalActiveCtx.lineTo(p2.x, p2.y);
+            globalActiveCtx.stroke();
+          }
+          state.lastDrawnIndex = pts.length - 1;
+        }
+        globalActiveCtx.restore();
+      }
+
+      function clearGlobalActiveCanvas() {
+        globalActiveCtx.save();
+        globalActiveCtx.setTransform(1, 0, 0, 1, 0, 0);
+        globalActiveCtx.clearRect(0, 0, globalActiveCanvas.width, globalActiveCanvas.height);
+        globalActiveCtx.restore();
+      }
+
+      // Real-Time Eraser Slicing
+      function distToSegmentSquared(p, v, w) {
+        const l2 = (w.x - v.x) ** 2 + (w.y - v.y) ** 2;
+        if (l2 === 0) return (p.x - v.x) ** 2 + (p.y - v.y) ** 2;
+        let t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2;
+        t = Math.max(0, Math.min(1, t));
+        return (p.x - (v.x + t * (w.x - v.x))) ** 2 + (p.y - (v.y + t * (w.y - v.y))) ** 2;
+      }
+
+      function executeRealTimeEraser(worldX, worldY) {
+        const eraserRadiusWorld = (state.brushSize / 2);
+        const radiusSq = eraserRadiusWorld * eraserRadiusWorld;
+
+        let modified = false;
+        const newStrokesList = [];
+
+        for (let i = 0; i < state.strokes.length; i++) {
+          const s = state.strokes[i];
+          if (!s.bbox) computeStrokeBBox(s);
+
+          if (
+            worldX + eraserRadiusWorld < s.bbox.minX ||
+            worldX - eraserRadiusWorld > s.bbox.maxX ||
+            worldY + eraserRadiusWorld < s.bbox.minY ||
+            worldY - eraserRadiusWorld > s.bbox.maxY
+          ) {
+            newStrokesList.push(s);
+            continue;
+          }
+
+          const pts = s.points;
+          let currentChunk = [];
+          let strokeWasCut = false;
+
+          for (let j = 0; j < pts.length; j++) {
+            let hit = false;
+            const curPt = pts[j];
+
+            if (j === 0) {
+              const d2 = (worldX - curPt.x) ** 2 + (worldY - curPt.y) ** 2;
+              if (d2 <= radiusSq) hit = true;
+            } else {
+              const prevPt = pts[j - 1];
+              const d2 = distToSegmentSquared({ x: worldX, y: worldY }, prevPt, curPt);
+              if (d2 <= radiusSq) hit = true;
+            }
+
+            if (hit) {
+              strokeWasCut = true;
+              modified = true;
+              if (currentChunk.length > 0) {
+                const subStroke = {
+                  id: 'strk_' + Math.random().toString(36).substr(2, 6),
+                  parentId: s.parentId,
+                  tool: s.tool,
+                  color: s.color,
+                  size: s.size,
+                  points: currentChunk
+                };
+                computeStrokeBBox(subStroke);
+                newStrokesList.push(subStroke);
+                currentChunk = [];
+              }
+            } else {
+              currentChunk.push(curPt);
+            }
+          }
+
+          if (currentChunk.length > 0) {
+            if (strokeWasCut) {
+              const subStroke = {
+                id: 'strk_' + Math.random().toString(36).substr(2, 6),
+                parentId: s.parentId,
+                tool: s.tool,
+                color: s.color,
+                size: s.size,
+                points: currentChunk
+              };
+              computeStrokeBBox(subStroke);
+              newStrokesList.push(subStroke);
+            } else {
+              newStrokesList.push(s);
+            }
+          }
+        }
+
+        if (modified) {
+          state.strokes = newStrokesList;
+          markBoardModified();
+          requestCachedRepaint();
+        }
+      }
+
+      // 8. UNIVERSAL LASSO SELECTION
+      function pointInPolygon(pt, poly) {
+        let inside = false;
+        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+          const xi = poly[i].x, yi = poly[i].y;
+          const xj = poly[j].x, yj = poly[j].y;
+          const intersect = ((yi > pt.y) !== (yj > pt.y)) &&
+            (pt.x < (xj - xi) * (pt.y - yi) / (yj - yi) + xi);
+          if (intersect) inside = !inside;
+        }
+        return inside;
+      }
+
+      function finishUniversalLasso() {
+        if (state.lassoLoop.length < 3) {
+          clearLassoCanvas();
+          state.lassoLoop = [];
+          return;
+        }
+
+        const poly = state.lassoLoop;
+        const matchedStrokes = [];
+        const matchedItems = [];
+
+        // Strokes
+        for (const stroke of state.strokes) {
+          if (!stroke.bbox) computeStrokeBBox(stroke);
+          const midX = (stroke.bbox.minX + stroke.bbox.maxX) / 2;
+          const midY = (stroke.bbox.minY + stroke.bbox.maxY) / 2;
+
+          if (pointInPolygon({ x: midX, y: midY }, poly)) {
+            matchedStrokes.push(stroke);
+            continue;
+          }
+
+          let hit = false;
+          for (let k = 0; k < stroke.points.length; k += Math.max(1, Math.floor(stroke.points.length / 5))) {
+            if (pointInPolygon(stroke.points[k], poly)) {
+              hit = true;
+              break;
+            }
+          }
+          if (hit) matchedStrokes.push(stroke);
+        }
+
+        // Images & Notes
+        for (const item of state.items) {
+          const corners = [
+            { x: item.x, y: item.y },
+            { x: item.x + item.width, y: item.y },
+            { x: item.x + item.width, y: item.y + item.height },
+            { x: item.x, y: item.y + item.height },
+            { x: item.x + item.width / 2, y: item.y + item.height / 2 }
+          ];
+
+          let hit = false;
+          for (const c of corners) {
+            if (pointInPolygon(c, poly)) {
+              hit = true;
+              break;
+            }
+          }
+          if (hit) matchedItems.push(item);
+        }
+
+        clearLassoCanvas();
+        state.lassoLoop = [];
+
+        if (matchedStrokes.length > 0 || matchedItems.length > 0) {
+          setupUniversalLassoBox(matchedStrokes, matchedItems);
+        } else {
+          clearLassoSelection();
+        }
+      }
+
+      function setupUniversalLassoBox(strokes, items) {
+        state.selectedStrokes = strokes;
+        state.selectedItems = items;
+
+        document.querySelectorAll('.ref-card').forEach(c => c.classList.remove('lasso-highlight'));
+        items.forEach(it => {
+          const el = document.getElementById(it.id);
+          if (el) el.classList.add('lasso-highlight');
+        });
+
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+        for (const stroke of strokes) {
+          if (!stroke.bbox) computeStrokeBBox(stroke);
+          if (stroke.bbox.minX < minX) minX = stroke.bbox.minX;
+          if (stroke.bbox.minY < minY) minY = stroke.bbox.minY;
+          if (stroke.bbox.maxX > maxX) maxX = stroke.bbox.maxX;
+          if (stroke.bbox.maxY > maxY) maxY = stroke.bbox.maxY;
+        }
+
+        for (const item of items) {
+          if (item.x < minX) minX = item.x;
+          if (item.y < minY) minY = item.y;
+          if (item.x + item.width > maxX) maxX = item.x + item.width;
+          if (item.y + item.height > maxY) maxY = item.y + item.height;
+        }
+
+        const pad = 12;
+        state.lassoBox = {
+          minX: minX - pad,
+          minY: minY - pad,
+          maxX: maxX + pad,
+          maxY: maxY + pad,
+          width: (maxX - minX) + pad * 2,
+          height: (maxY - minY) + pad * 2,
+          initialStrokes: strokes.map(s => ({
+            stroke: s,
+            points: s.points.map(p => ({ x: p.x, y: p.y, pressure: p.pressure }))
+          })),
+          initialItems: items.map(it => ({
+            item: it,
+            x: it.x,
+            y: it.y,
+            width: it.width,
+            height: it.height
+          }))
+        };
+
+        updateLassoBoxDOM();
+        lassoTransformBox.style.display = 'block';
+        lassoActionBar.classList.remove('hidden');
+        const count = strokes.length + items.length;
+        lassoCountTxt.textContent = `${count} Item${count > 1 ? 's' : ''} Selected`;
+      }
+
+      function updateLassoBoxDOM() {
+        if (!state.lassoBox) return;
+        const b = state.lassoBox;
+        lassoTransformBox.style.transform = `translate(${b.minX}px, ${b.minY}px)`;
+        lassoTransformBox.style.width = `${b.width}px`;
+        lassoTransformBox.style.height = `${b.height}px`;
+      }
+
+      function commitLassoTransform() {
+        if (!state.lassoBox) return;
+        for (const s of state.selectedStrokes) {
+          computeStrokeBBox(s);
+        }
+        clearLassoSelection();
+        markBoardModified();
+        requestCachedRepaint();
+      }
+
+      function clearLassoSelection() {
+        document.querySelectorAll('.ref-card').forEach(c => c.classList.remove('lasso-highlight'));
+        state.selectedStrokes = [];
+        state.selectedItems = [];
+        state.lassoBox = null;
+        lassoTransformBox.style.display = 'none';
+        lassoActionBar.classList.add('hidden');
+      }
+
+      function deleteLassoSelected() {
+        if (state.selectedStrokes.length > 0) {
+          const toDeleteStrokes = new Set(state.selectedStrokes);
+          state.strokes = state.strokes.filter(s => !toDeleteStrokes.has(s));
+        }
+
+        if (state.selectedItems.length > 0) {
+          const toDeleteItems = new Set(state.selectedItems.map(i => i.id));
+          state.items = state.items.filter(it => !toDeleteItems.has(it.id));
+          toDeleteItems.forEach(id => {
+            const card = document.getElementById(id);
+            if (card) card.remove();
+          });
+        }
+
+        clearLassoSelection();
+        markBoardModified();
+        requestCachedRepaint();
+      }
+
+      // Lasso Bounding Box Interactive Drag & Resizing
+      (() => {
+        let isDraggingBox = false;
+        let isResizingBox = false;
+        let activeHandle = null;
+        let startX, startY;
+        let origBox = null;
+
+        lassoTransformBox.addEventListener('pointerdown', (e) => {
+          if (e.button !== 0) return;
+          e.stopPropagation();
+
+          const handle = e.target.closest('.lasso-handle');
+          startX = e.clientX;
+          startY = e.clientY;
+          origBox = { ...state.lassoBox };
+
+          if (handle) {
+            isResizingBox = true;
+            activeHandle = handle.dataset.handle;
+            handle.setPointerCapture(e.pointerId);
+          } else {
+            isDraggingBox = true;
+            lassoTransformBox.setPointerCapture(e.pointerId);
+          }
+        });
+
+        lassoTransformBox.addEventListener('pointermove', (e) => {
+          if (!isDraggingBox && !isResizingBox) return;
+          const dx = (e.clientX - startX) / state.zoom;
+          const dy = (e.clientY - startY) / state.zoom;
+
+          if (isDraggingBox) {
+            state.lassoBox.minX = origBox.minX + dx;
+            state.lassoBox.minY = origBox.minY + dy;
+
+            for (const item of origBox.initialStrokes) {
+              for (let i = 0; i < item.stroke.points.length; i++) {
+                item.stroke.points[i].x = item.points[i].x + dx;
+                item.stroke.points[i].y = item.points[i].y + dy;
+              }
+            }
+
+            for (const item of origBox.initialItems) {
+              item.item.x = item.x + dx;
+              item.item.y = item.y + dy;
+              updateCardDOM(item.item);
+            }
+          } else if (isResizingBox) {
+            let newW = origBox.width;
+            let newH = origBox.height;
+            let originX = origBox.minX;
+            let originY = origBox.minY;
+
+            if (activeHandle === 'br') {
+              newW = Math.max(30, origBox.width + dx);
+              newH = Math.max(30, origBox.height + dy);
+            } else if (activeHandle === 'bl') {
+              newW = Math.max(30, origBox.width - dx);
+              newH = Math.max(30, origBox.height + dy);
+              originX = origBox.minX + (origBox.width - newW);
+            } else if (activeHandle === 'tr') {
+              newW = Math.max(30, origBox.width + dx);
+              newH = Math.max(30, origBox.height - dy);
+              originY = origBox.minY + (origBox.height - newH);
+            } else if (activeHandle === 'tl') {
+              newW = Math.max(30, origBox.width - dx);
+              newH = Math.max(30, origBox.height - dy);
+              originX = origBox.minX + (origBox.width - newW);
+              originY = origBox.minY + (origBox.height - newH);
+            }
+
+            state.lassoBox.minX = originX;
+            state.lassoBox.minY = originY;
+            state.lassoBox.width = newW;
+            state.lassoBox.height = newH;
+
+            const scaleX = newW / origBox.width;
+            const scaleY = newH / origBox.height;
+
+            for (const item of origBox.initialStrokes) {
+              for (let i = 0; i < item.stroke.points.length; i++) {
+                const relX = item.points[i].x - origBox.minX;
+                const relY = item.points[i].y - origBox.minY;
+                item.stroke.points[i].x = originX + relX * scaleX;
+                item.stroke.points[i].y = originY + relY * scaleY;
+              }
+            }
+
+            for (const item of origBox.initialItems) {
+              const relX = item.x - origBox.minX;
+              const relY = item.y - origBox.minY;
+              item.item.x = originX + relX * scaleX;
+              item.item.y = originY + relY * scaleY;
+              item.item.width = Math.max(40, item.width * scaleX);
+              item.item.height = Math.max(40, item.height * scaleY);
+              updateCardDOM(item.item);
+              resizeCardCanvas(item.item);
+            }
+          }
+
+          updateLassoBoxDOM();
+          requestCachedRepaint();
+        });
+
+        const stopTransform = (e) => {
+          if (isDraggingBox || isResizingBox) {
+            isDraggingBox = false;
+            isResizingBox = false;
+            if (state.lassoBox) {
+              state.lassoBox.initialStrokes = state.selectedStrokes.map(s => ({
+                stroke: s,
+                points: s.points.map(p => ({ x: p.x, y: p.y, pressure: p.pressure }))
+              }));
+              state.lassoBox.initialItems = state.selectedItems.map(it => ({
+                item: it,
+                x: it.x,
+                y: it.y,
+                width: it.width,
+                height: it.height
+              }));
+            }
+            try { e.target.releasePointerCapture(e.pointerId); } catch(err) {}
+          }
+        };
+
+        lassoTransformBox.addEventListener('pointerup', stopTransform);
+        lassoTransformBox.addEventListener('pointercancel', stopTransform);
+      })();
+
+      function renderLassoCanvas() {
+        lassoCtx.save();
+        lassoCtx.setTransform(1, 0, 0, 1, 0, 0);
+        lassoCtx.clearRect(0, 0, lassoCanvas.width, lassoCanvas.height);
+        lassoCtx.restore();
+
+        if (state.lassoLoop.length < 2) return;
+
+        lassoCtx.save();
+        lassoCtx.scale(dpr, dpr);
+        lassoCtx.strokeStyle = '#60a5fa';
+        lassoCtx.lineWidth = 1.8;
+        lassoCtx.setLineDash([4, 4]);
+        lassoCtx.fillStyle = 'rgba(96, 165, 250, 0.14)';
+
+        lassoCtx.beginPath();
+        for (let i = 0; i < state.lassoLoop.length; i++) {
+          const pt = worldToScreen(state.lassoLoop[i].x, state.lassoLoop[i].y);
+          if (i === 0) lassoCtx.moveTo(pt.x, pt.y);
+          else lassoCtx.lineTo(pt.x, pt.y);
+        }
+        lassoCtx.closePath();
+        lassoCtx.fill();
+        lassoCtx.stroke();
+        lassoCtx.restore();
+      }
+
+      function clearLassoCanvas() {
+        lassoCtx.save();
+        lassoCtx.setTransform(1, 0, 0, 1, 0, 0);
+        lassoCtx.clearRect(0, 0, lassoCanvas.width, lassoCanvas.height);
+        lassoCtx.restore();
+      }
+
+      // 9. UNIFIED POINTER ENGINE (Navigation + Drawing + Real-Time Eraser + Pinning)
+      const touchMap = new Map();
+      let initPinchDist = null;
+      let initPinchZoom = 1.0;
+      let isLassoDrawing = false;
+
+      window.addEventListener('pointermove', (e) => {
+        updateReticlePos(e.clientX, e.clientY);
+      });
+
+      viewport.addEventListener('pointerdown', (e) => {
+        touchMap.set(e.pointerId, e);
+        updateReticlePos(e.clientX, e.clientY);
+
+        const isRMB = e.button === 2;
+        const isMMB = e.button === 1;
+        const isSpacePan = state.spacePressed && e.button === 0;
+
+        if (isRMB || isMMB || isSpacePan) {
+          state.isPanning = true;
+          state.lastPanX = e.clientX;
+          state.lastPanY = e.clientY;
+          viewport.classList.add('is-panning');
+          return;
+        }
+
+        if (touchMap.size === 2) {
+          state.isPanning = false;
+          if (state.activeStroke) {
+            state.activeStroke = null;
+            clearGlobalActiveCanvas();
+          }
+          if (isLassoDrawing) {
+            isLassoDrawing = false;
+            clearLassoCanvas();
+          }
+          const [t1, t2] = Array.from(touchMap.values());
+          initPinchDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+          initPinchZoom = state.zoom;
+          return;
+        }
+
+        if (state.toolMode === 'lasso' && e.button === 0) {
+          if (state.lassoBox) commitLassoTransform();
+          isLassoDrawing = true;
+          state.lassoLoop = [screenToWorld(e.clientX, e.clientY)];
+          try { viewport.setPointerCapture(e.pointerId); } catch(err) {}
+          return;
+        }
+
+        const isDrawMode = state.toolMode === 'draw';
+        const isMouse = e.pointerType === 'mouse';
+        const isStylus = e.pointerType === 'pen';
+        const isTouch = e.pointerType === 'touch';
+
+        let shouldOperate = false;
+        if (isDrawMode && touchMap.size === 1) {
+          if (isMouse && e.button === 0) shouldOperate = true;
+          else if (isStylus) shouldOperate = true;
+          else if (isTouch) shouldOperate = !state.stylusOnly;
+        }
+
+        if (shouldOperate) {
+          try { viewport.setPointerCapture(e.pointerId); } catch(err) {}
+          const worldPos = screenToWorld(e.clientX, e.clientY);
+
+          if (state.drawTool === 'eraser') {
+            executeRealTimeEraser(worldPos.x, worldPos.y);
+            return;
+          }
+
+          const parentObj = getItemAtWorld(worldPos.x, worldPos.y);
+          const parentId = parentObj ? parentObj.id : null;
+
+          const pressure = (e.pressure && e.pressure > 0) ? e.pressure : 0.5;
+          state.activeStroke = {
+            id: 'strk_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
+            parentId: parentId,
+            tool: state.drawTool,
+            color: state.brushColor,
+            size: state.brushSize,
+            points: [{ x: worldPos.x, y: worldPos.y, pressure }]
+          };
+          state.lastDrawnIndex = 0;
+          flushIncrementalActiveStroke();
+          return;
+        }
+
+        const canPan = (state.toolMode === 'select' && (e.button === 0 || isTouch)) || (state.stylusOnly && isTouch);
+        if (canPan) {
+          if (state.lassoBox) commitLassoTransform();
+          state.isPanning = true;
+          state.lastPanX = e.clientX;
+          state.lastPanY = e.clientY;
+          viewport.classList.add('is-panning');
+          if (e.target === viewport) selectCard(null);
+        }
+      });
+
+      viewport.addEventListener('pointermove', (e) => {
+        if (touchMap.has(e.pointerId)) {
+          touchMap.set(e.pointerId, e);
+        }
+        updateReticlePos(e.clientX, e.clientY);
+
+        if (touchMap.size === 2) {
+          const [t1, t2] = Array.from(touchMap.values());
+          const currentDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+          const currentMid = {
+            x: (t1.clientX + t2.clientX) / 2,
+            y: (t1.clientY + t2.clientY) / 2
+          };
+
+          if (initPinchDist && initPinchDist > 0) {
+            const factor = currentDist / initPinchDist;
+            const newZoom = Math.min(Math.max(initPinchZoom * factor, state.minZoom), state.maxZoom);
+
+            const worldMid = screenToWorld(currentMid.x, currentMid.y);
+            state.zoom = newZoom;
+            state.panX = currentMid.x - worldMid.x * state.zoom;
+            state.panY = currentMid.y - worldMid.y * state.zoom;
+
+            updateWorldTransform();
+            requestCachedRepaint();
+          }
+          return;
+        }
+
+        if (isLassoDrawing) {
+          state.lassoLoop.push(screenToWorld(e.clientX, e.clientY));
+          renderLassoCanvas();
+          return;
+        }
+
+        if (state.toolMode === 'draw' && state.drawTool === 'eraser' && (e.buttons === 1 || e.pressure > 0)) {
+          const worldPos = screenToWorld(e.clientX, e.clientY);
+          executeRealTimeEraser(worldPos.x, worldPos.y);
+          return;
+        }
+
+        if (state.activeStroke) {
+          const worldPos = screenToWorld(e.clientX, e.clientY);
+          const pressure = (e.pressure && e.pressure > 0) ? e.pressure : 0.5;
+          state.activeStroke.points.push({ x: worldPos.x, y: worldPos.y, pressure });
+          flushIncrementalActiveStroke();
+          return;
+        }
+
+        if (state.isPanning) {
+          const dx = e.clientX - state.lastPanX;
+          const dy = e.clientY - state.lastPanY;
+          state.panX += dx;
+          state.panY += dy;
+          state.lastPanX = e.clientX;
+          state.lastPanY = e.clientY;
+          updateWorldTransform();
+          requestCachedRepaint();
+        }
+      });
+
+      function onPointerEnd(e) {
+        touchMap.delete(e.pointerId);
+
+        if (touchMap.size < 2) {
+          initPinchDist = null;
+        }
+
+        if (isLassoDrawing) {
+          isLassoDrawing = false;
+          finishUniversalLasso();
+        }
+
+        if (state.activeStroke) {
+          computeStrokeBBox(state.activeStroke);
+          state.strokes.push(state.activeStroke);
+          state.activeStroke = null;
+          clearGlobalActiveCanvas();
+          markBoardModified();
+          requestCachedRepaint();
+        }
+
+        if (state.isPanning && touchMap.size === 0) {
+          state.isPanning = false;
+          viewport.classList.remove('is-panning');
+        }
+
+        try { viewport.releasePointerCapture(e.pointerId); } catch(err) {}
+      }
+
+      viewport.addEventListener('pointerup', onPointerEnd);
+      viewport.addEventListener('pointercancel', onPointerEnd);
+      viewport.addEventListener('contextmenu', (e) => e.preventDefault());
+
+      viewport.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        const factor = e.deltaY < 0 ? 1.12 : 0.88;
+        const newZoom = Math.min(Math.max(state.zoom * factor, state.minZoom), state.maxZoom);
+
+        const worldPos = screenToWorld(e.clientX, e.clientY);
+        state.zoom = newZoom;
+        state.panX = e.clientX - worldPos.x * state.zoom;
+        state.panY = e.clientY - worldPos.y * state.zoom;
+
+        updateWorldTransform();
+        requestCachedRepaint();
+      }, { passive: false });
+
+      // 10. REFERENCE CARDS & STICKY NOTES
+      function addBoardItem(config) {
+        const item = {
+          id: 'item_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
+          type: config.type || 'image',
+          src: config.src || '',
+          text: config.text || 'Write reference note here...',
+          x: config.x || 0,
+          y: config.y || 0,
+          width: config.width || 320,
+          height: config.height || 240,
+          rotation: config.rotation || 0,
+          flipH: config.flipH || 1,
+          flipV: config.flipV || 1,
+          opacity: config.opacity !== undefined ? config.opacity : 1.0,
+          zIndex: ++state.highestZ
+        };
+
+        state.items.push(item);
+        renderCardDOM(item);
+        selectCard(item.id);
+        markBoardModified();
+        return item;
+      }
+
+      function renderCardDOM(item) {
+        const card = document.createElement('div');
+        card.id = item.id;
+        card.className = 'ref-card';
+        card.style.transform = `translate(${item.x}px, ${item.y}px) rotate(${item.rotation}deg) scale(${item.flipH}, ${item.flipV})`;
+        card.style.width = item.width + 'px';
+        card.style.height = item.height + 'px';
+        card.style.zIndex = item.zIndex;
+        card.style.opacity = item.opacity;
+
+        let contentHTML = '';
+        if (item.type === 'image') {
+          contentHTML = `
+            <div class="ref-card-content">
+              <img src="${item.src}" draggable="false">
+              <canvas class="card-ink-layer"></canvas>
+            </div>
+            <div class="resize-handle handle-br"></div>
+            <div class="resize-handle handle-tr"></div>
+            <div class="resize-handle handle-bl"></div>
+            <div class="resize-handle handle-tl"></div>
+          `;
+        } else {
+          contentHTML = `
+            <div class="ref-card-content p-3.5 shadow-lg flex flex-col" style="background:#fef08a;">
+              <div class="flex items-center justify-between pb-1 text-black/40 text-[10px] font-bold uppercase tracking-wider select-none pointer-events-none">
+                <span>Sticky Note</span>
+                <i data-lucide="pin" class="w-3 h-3"></i>
+              </div>
+              <textarea class="note-editor-area">${item.text}</textarea>
+              <canvas class="card-ink-layer"></canvas>
+            </div>
+            <div class="resize-handle handle-br"></div>
+          `;
+        }
+
+        card.innerHTML = contentHTML;
+
+        const inkCanvas = card.querySelector('.card-ink-layer');
+        if (inkCanvas) {
+          inkCanvas.width = item.width * dpr;
+          inkCanvas.height = item.height * dpr;
+        }
+
+        if (item.type === 'note') {
+          const textarea = card.querySelector('textarea');
+          textarea.addEventListener('input', (e) => {
+            item.text = e.target.value;
+            markBoardModified();
+          });
+        }
+
+        bindCardInteractions(card, item);
+        cardsContainer.appendChild(card);
+        lucide.createIcons();
+        renderCardLocalCanvas(item);
+      }
+
+      function updateCardDOM(item) {
+        const card = document.getElementById(item.id);
+        if (!card) return;
+        card.style.transform = `translate(${item.x}px, ${item.y}px) rotate(${item.rotation}deg) scale(${item.flipH}, ${item.flipV})`;
+        card.style.width = item.width + 'px';
+        card.style.height = item.height + 'px';
+        card.style.zIndex = item.zIndex;
+        card.style.opacity = item.opacity;
+      }
+
+      function selectCard(id) {
+        state.selectedItemId = id;
+        document.querySelectorAll('.ref-card').forEach(el => {
+          el.classList.toggle('selected', el.id === id);
+        });
+
+        if (id) {
+          const item = state.items.find(i => i.id === id);
+          if (item) {
+            selectionBar.classList.remove('hidden');
+            document.getElementById('item-opacity').value = Math.round(item.opacity * 100);
+          }
+        } else {
+          selectionBar.classList.add('hidden');
+        }
+      }
+
+      function bindCardInteractions(card, item) {
+        let isDragging = false;
+        let isResizing = false;
+        let activeHandle = null;
+        let startX, startY;
+        let origX, origY, origW, origH;
+
+        card.addEventListener('pointerdown', (e) => {
+          if (e.button === 2 || e.button === 1 || state.spacePressed) return;
+
+          if (state.toolMode === 'draw' || state.toolMode === 'lasso') {
+            return;
+          }
+
+          if (e.target.tagName.toLowerCase() === 'textarea') {
+            selectCard(item.id);
+            return;
+          }
+
+          e.stopPropagation();
+          selectCard(item.id);
+          item.zIndex = ++state.highestZ;
+          card.style.zIndex = item.zIndex;
+
+          const isHandle = e.target.classList.contains('resize-handle');
+          if (isHandle) {
+            isResizing = true;
+            activeHandle = e.target;
+            startX = e.clientX;
+            startY = e.clientY;
+            origW = item.width;
+            origH = item.height;
+            origX = item.x;
+            origY = item.y;
+            e.target.setPointerCapture(e.pointerId);
+          } else {
+            isDragging = true;
+            startX = e.clientX;
+            startY = e.clientY;
+            origX = item.x;
+            origY = item.y;
+            card.setPointerCapture(e.pointerId);
+          }
+        });
+
+        card.addEventListener('pointermove', (e) => {
+          if (isDragging) {
+            const dx = (e.clientX - startX) / state.zoom;
+            const dy = (e.clientY - startY) / state.zoom;
+            const newX = origX + dx;
+            const newY = origY + dy;
+            const shiftX = newX - item.x;
+            const shiftY = newY - item.y;
+
+            item.x = newX;
+            item.y = newY;
+            updateCardDOM(item);
+
+            for (let i = 0; i < state.strokes.length; i++) {
+              const s = state.strokes[i];
+              if (s.parentId === item.id) {
+                for (let j = 0; j < s.points.length; j++) {
+                  s.points[j].x += shiftX;
+                  s.points[j].y += shiftY;
+                }
+                computeStrokeBBox(s);
+              }
+            }
+          } else if (isResizing) {
+            const dx = (e.clientX - startX) / state.zoom;
+            const dy = (e.clientY - startY) / state.zoom;
+
+            if (activeHandle.classList.contains('handle-br')) {
+              item.width = Math.max(60, origW + dx);
+              item.height = Math.max(50, origH + dy);
+            } else if (activeHandle.classList.contains('handle-bl')) {
+              const nw = Math.max(60, origW - dx);
+              item.x = origX + (origW - nw);
+              item.width = nw;
+              item.height = Math.max(50, origH + dy);
+            } else if (activeHandle.classList.contains('handle-tr')) {
+              const nh = Math.max(50, origH - dy);
+              item.y = origY + (origH - nh);
+              item.width = Math.max(60, origW + dx);
+              item.height = nh;
+            } else if (activeHandle.classList.contains('handle-tl')) {
+              const nw = Math.max(60, origW - dx);
+              const nh = Math.max(50, origH - dy);
+              item.x = origX + (origW - nw);
+              item.y = origY + (origH - nh);
+              item.width = nw;
+              item.height = nh;
+            }
+            updateCardDOM(item);
+            resizeCardCanvas(item);
+          }
+        });
+
+        const onStop = () => {
+          if (isDragging || isResizing) {
+            isDragging = false;
+            isResizing = false;
+            activeHandle = null;
+            markBoardModified();
+          }
+        };
+
+        card.addEventListener('pointerup', onStop);
+        card.addEventListener('pointercancel', onStop);
+      }
+
+      function packReferenceImages() {
+        const imageCards = state.items.filter(i => i.type === 'image');
+        if (imageCards.length === 0) return;
+
+        const gap = 24;
+        const cols = Math.ceil(Math.sqrt(imageCards.length));
+        let cursorX = -((cols * 320) / 2);
+        let cursorY = -200;
+        let maxRowHeight = 0;
+        let col = 0;
+
+        imageCards.forEach((item) => {
+          const shiftX = cursorX - item.x;
+          const shiftY = cursorY - item.y;
+
+          item.x = cursorX;
+          item.y = cursorY;
+          item.rotation = 0;
+          item.flipH = 1;
+          item.flipV = 1;
+
+          for (const s of state.strokes) {
+            if (s.parentId === item.id) {
+              for (const p of s.points) {
+                p.x += shiftX;
+                p.y += shiftY;
+              }
+              computeStrokeBBox(s);
+            }
+          }
+
+          cursorX += item.width + gap;
+          maxRowHeight = Math.max(maxRowHeight, item.height);
+          col++;
+
+          if (col >= cols) {
+            col = 0;
+            cursorX = -((cols * 320) / 2);
+            cursorY += maxRowHeight + gap;
+            maxRowHeight = 0;
+          }
+
+          updateCardDOM(item);
+          renderCardLocalCanvas(item);
+        });
+
+        state.panX = window.innerWidth / 2;
+        state.panY = window.innerHeight / 2;
+        updateWorldTransform();
+        requestCachedRepaint();
+        markBoardModified();
+      }
+
+      // 11. CLIPBOARD & FILE IMPORT
+      window.addEventListener('paste', (e) => {
+        const items = e.clipboardData?.items;
+        if (!items) return;
+
+        for (const item of items) {
+          if (item.type.includes('image')) {
+            const blob = item.getAsFile();
+            const reader = new FileReader();
+            reader.onload = (evt) => {
+              const img = new Image();
+              img.onload = () => {
+                let w = img.width;
+                let h = img.height;
+                const maxD = 480;
+                if (w > maxD || h > maxD) {
+                  const r = Math.min(maxD / w, maxD / h);
+                  w *= r;
+                  h *= r;
+                }
+                const center = screenToWorld(window.innerWidth / 2, window.innerHeight / 2);
+                addBoardItem({
+                  type: 'image',
+                  src: evt.target.result,
+                  x: center.x - w / 2,
+                  y: center.y - h / 2,
+                  width: Math.round(w),
+                  height: Math.round(h)
+                });
+              };
+              img.src = evt.target.result;
+            };
+            reader.readAsDataURL(blob);
+          }
+        }
+      });
+
+      window.addEventListener('dragover', (e) => e.preventDefault());
+      window.addEventListener('drop', (e) => {
+        e.preventDefault();
+        const files = e.dataTransfer?.files;
+        if (!files || files.length === 0) return;
+
+        const dropPos = screenToWorld(e.clientX, e.clientY);
+        let offset = 0;
+
+        Array.from(files).forEach(file => {
+          if (file.type.startsWith('image/')) {
+            const reader = new FileReader();
+            reader.onload = (evt) => {
+              const img = new Image();
+              img.onload = () => {
+                let w = img.width;
+                let h = img.height;
+                const maxD = 420;
+                if (w > maxD || h > maxD) {
+                  const r = Math.min(maxD / w, maxD / h);
+                  w *= r;
+                  h *= r;
+                }
+                addBoardItem({
+                  type: 'image',
+                  src: evt.target.result,
+                  x: dropPos.x + offset,
+                  y: dropPos.y + offset,
+                  width: Math.round(w),
+                  height: Math.round(h)
+                });
+                offset += 30;
+              };
+              img.src = evt.target.result;
+            };
+            reader.readAsDataURL(file);
+          }
+        });
+      });
+
+      document.getElementById('file-image-input').addEventListener('change', (e) => {
+        const files = e.target.files;
+        if (!files || files.length === 0) return;
+        const center = screenToWorld(window.innerWidth / 2, window.innerHeight / 2);
+        let offset = 0;
+
+        Array.from(files).forEach(file => {
+          if (file.type.startsWith('image/')) {
+            const reader = new FileReader();
+            reader.onload = (evt) => {
+              const img = new Image();
+              img.onload = () => {
+                let w = img.width;
+                let h = img.height;
+                const maxD = 420;
+                if (w > maxD || h > maxD) {
+                  const r = Math.min(maxD / w, maxD / h);
+                  w *= r;
+                  h *= r;
+                }
+                addBoardItem({
+                  type: 'image',
+                  src: evt.target.result,
+                  x: center.x - w / 2 + offset,
+                  y: center.y - h / 2 + offset,
+                  width: Math.round(w),
+                  height: Math.round(h)
+                });
+                offset += 25;
+              };
+              img.src = evt.target.result;
+            };
+            reader.readAsDataURL(file);
+          }
+        });
+        e.target.value = '';
+      });
+
+      // ========================================================
+      // 12. DUAL-STORAGE SYSTEM: LOCAL FOLDER & GOOGLE DRIVE SYNC
+      // ========================================================
+
+      function markBoardModified() {
+        state.storage.hasUnsavedChanges = true;
+        saveLocalBackup();
+      }
+
+      function serializeBoardPayload() {
+        return JSON.stringify({
+          version: '6.0',
+          timestamp: Date.now(),
+          strokes: state.strokes,
+          items: state.items
+        }, null, 2);
+      }
+
+      function deserializeBoardPayload(jsonStr) {
+        try {
+          const data = JSON.parse(jsonStr);
+          if (data && (Array.isArray(data.items) || Array.isArray(data.strokes))) {
+            cardsContainer.innerHTML = '';
+            state.items = [];
+            state.strokes = [];
+
+            if (Array.isArray(data.items)) {
+              data.items.forEach(it => {
+                if (it.src || it.type === 'note') addBoardItem(it);
+              });
+            }
+            if (Array.isArray(data.strokes)) {
+              state.strokes = data.strokes;
+              state.strokes.forEach(computeStrokeBBox);
+            }
+
+            clearLassoSelection();
+            requestCachedRepaint();
+            updateLastSavedIndicator();
+            return true;
+          }
+        } catch(err) {
+          console.error('Failed to parse board payload:', err);
+        }
+        return false;
+      }
+
+      function updateLastSavedIndicator() {
+        const timeStr = new Date().toLocaleTimeString();
+        state.storage.lastSavedTime = timeStr;
+        state.storage.hasUnsavedChanges = false;
+        document.getElementById('sync-last-saved-time').textContent = `Last synced: ${timeStr}`;
+      }
+
+      // Local Storage quick browser cache
+      function saveLocalBackup() {
+        try {
+          const payload = {
+            strokes: state.strokes,
+            items: state.items.map(it => ({
+              ...it,
+              src: it.src && it.src.length < 2500000 ? it.src : ''
+            }))
+          };
+          localStorage.setItem('canvasref_v6_board', JSON.stringify(payload));
+        } catch(e) {
+          console.warn('LocalStorage quota limit reached:', e);
+        }
+      }
+
+      // --- LOCAL SYSTEM DIRECTORY API (showDirectoryPicker) ---
+      const localFolderDisplay = document.getElementById('local-folder-display');
+      const badgeLocalDot = document.getElementById('badge-local-dot');
+      const badgeLocalText = document.getElementById('badge-local-text');
+
+      async function pickLocalDirectory() {
+        if (!('showDirectoryPicker' in window)) {
+          showToast('File System Access API is not supported in this browser. Fallback export will be used.', 'warning');
+          return;
+        }
+
+        try {
+          const handle = await window.showDirectoryPicker();
+          state.storage.localDirHandle = handle;
+          state.storage.localFolderName = handle.name;
+
+          localFolderDisplay.textContent = `📁 ${handle.name}`;
+          localFolderDisplay.classList.add('text-emerald-400');
+          badgeLocalDot.className = 'w-1.5 h-1.5 rounded-full bg-emerald-400';
+          badgeLocalText.textContent = `Local: ${handle.name}`;
+
+          showToast(`Directory "${handle.name}" connected!`, 'success');
+        } catch(err) {
+          if (err.name !== 'AbortError') {
+            console.error(err);
+            showToast('Could not access folder: ' + err.message, 'error');
+          }
+        }
+      }
+
+      async function saveToLocalFolder() {
+        const fileName = document.getElementById('input-local-filename').value.trim() || state.storage.localFileName;
+        state.storage.localFileName = fileName;
+        const payloadStr = serializeBoardPayload();
+
+        // 1. Direct overwrite if Directory Handle exists
+        if (state.storage.localDirHandle) {
+          try {
+            const fileHandle = await state.storage.localDirHandle.getFileHandle(fileName, { create: true });
+            const writable = await fileHandle.createWritable();
+            await writable.write(payloadStr);
+            await writable.close();
+
+            updateLastSavedIndicator();
+            showToast(`Overwrote local file: ${fileName} in folder "${state.storage.localFolderName}"`, 'success');
+            return true;
+          } catch(err) {
+            console.error(err);
+            showToast('Failed to overwrite in folder: ' + err.message, 'error');
+          }
+        }
+
+        // 2. Fallback to File System Access Save File Picker or classic download
+        if ('showSaveFilePicker' in window) {
+          try {
+            const fileHandle = await window.showSaveFilePicker({
+              suggestedName: fileName,
+              types: [{ description: 'CanvasRef Board', accept: { 'application/json': ['.crf', '.json'] } }]
+            });
+            const writable = await fileHandle.createWritable();
+            await writable.write(payloadStr);
+            await writable.close();
+
+            updateLastSavedIndicator();
+            showToast(`Saved to ${fileName}`, 'success');
+            return true;
+          } catch(err) {
+            if (err.name !== 'AbortError') showToast('Save canceled: ' + err.message, 'warning');
+            return false;
+          }
+        }
+
+        // 3. Fallback standard anchor download
+        downloadPayloadFallback(payloadStr, fileName);
+        updateLastSavedIndicator();
+        showToast(`Downloaded ${fileName}`, 'info');
+        return true;
+      }
+
+      async function fetchFromLocalFolder() {
+        const fileName = document.getElementById('input-local-filename').value.trim() || state.storage.localFileName;
+
+        if (state.storage.localDirHandle) {
+          try {
+            const fileHandle = await state.storage.localDirHandle.getFileHandle(fileName);
+            const file = await fileHandle.getFile();
+            const text = await file.text();
+            if (deserializeBoardPayload(text)) {
+              showToast(`Loaded and replaced workspace from ${fileName}!`, 'success');
+              return true;
+            } else {
+              showToast(`File ${fileName} was empty or corrupted`, 'error');
+            }
+          } catch(err) {
+            console.error(err);
+            showToast(`File "${fileName}" not found in local directory`, 'error');
+          }
+        } else {
+          // Open system file picker
+          document.getElementById('file-json-upload').click();
+        }
+        return false;
+      }
+
+      function downloadPayloadFallback(content, filename) {
+        const blob = new Blob([content], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        a.click();
+        URL.revokeObjectURL(url);
+      }
+
+      // --- GOOGLE DRIVE CLOUD SYNC & REST API v3 ---
+      const badgeCloudDot = document.getElementById('badge-cloud-dot');
+      const badgeCloudText = document.getElementById('badge-cloud-text');
+      const gdrivePillDot = document.getElementById('gdrive-pill-dot');
+      const gdrivePillText = document.getElementById('gdrive-pill-text');
+      const gdriveAuthBtnText = document.getElementById('gdrive-auth-btn-text');
+
+      let tokenClient = null;
+
+      function updateCloudStatus(status, text) {
+        if (status === 'connected') {
+          badgeCloudDot.className = 'w-1.5 h-1.5 rounded-full bg-blue-400';
+          badgeCloudText.textContent = text || 'Cloud: Connected';
+          gdrivePillDot.className = 'w-1.5 h-1.5 rounded-full bg-blue-400';
+          gdrivePillText.textContent = text || 'Connected';
+          gdriveAuthBtnText.textContent = 'Disconnect Google Drive';
+        } else if (status === 'mock') {
+          badgeCloudDot.className = 'w-1.5 h-1.5 rounded-full bg-purple-400';
+          badgeCloudText.textContent = 'Cloud: Sandbox Mock';
+          gdrivePillDot.className = 'w-1.5 h-1.5 rounded-full bg-purple-400';
+          gdrivePillText.textContent = 'Sandbox Mock';
+          gdriveAuthBtnText.textContent = 'Connect with Google';
+        } else {
+          badgeCloudDot.className = 'w-1.5 h-1.5 rounded-full bg-zinc-500';
+          badgeCloudText.textContent = 'Cloud: Offline';
+          gdrivePillDot.className = 'w-1.5 h-1.5 rounded-full bg-zinc-500';
+          gdrivePillText.textContent = 'Disconnected';
+          gdriveAuthBtnText.textContent = 'Connect with Google';
+        }
+      }
+
+      function initGoogleDriveAuth() {
+        const clientId = document.getElementById('input-gdrive-client-id').value.trim();
+        state.storage.gdriveClientId = clientId;
+
+        if (!clientId) {
+          showToast('Please enter your Google OAuth Client ID in Settings first, or use Sandbox Mock Cloud.', 'warning');
+          return;
+        }
+
+        if (typeof google === 'undefined' || !google.accounts) {
+          showToast('Google Identity Services library is still loading. Please try again in a moment.', 'warning');
+          return;
+        }
+
+        tokenClient = google.accounts.oauth2.initTokenClient({
+          client_id: clientId,
+          scope: 'https://www.googleapis.com/auth/drive.file',
+          callback: async (resp) => {
+            if (resp.error) {
+              console.error(resp);
+              showToast('Google Authentication Failed: ' + resp.error, 'error');
+              return;
+            }
+            state.storage.gdriveToken = resp.access_token;
+            state.storage.gdriveConnected = true;
+            state.storage.mockCloudEnabled = false;
+            updateCloudStatus('connected', 'Google Drive Live');
+            showToast('Google Drive connected successfully!', 'success');
+          }
+        });
+
+        tokenClient.requestAccessToken({ prompt: 'consent' });
+      }
+
+      // Save / Overwrite Cloud File (Drive REST API v3)
+      async function saveToGoogleDriveCloud() {
+        const fileName = document.getElementById('input-cloud-filename').value.trim() || state.storage.gdriveFileName;
+        const folderId = document.getElementById('input-cloud-folder-id').value.trim();
+        const payloadStr = serializeBoardPayload();
+
+        // 1. Sandbox Mock Cloud Mode
+        if (state.storage.mockCloudEnabled) {
+          state.storage.mockCloudData = payloadStr;
+          updateLastSavedIndicator();
+          showToast(`[Mock Cloud] Successfully overwrote cloud file "${fileName}"`, 'success');
+          return true;
+        }
+
+        // 2. Real Google Drive v3 API
+        if (!state.storage.gdriveConnected || !state.storage.gdriveToken) {
+          showToast('Google Drive is not connected. Open Settings to connect or enable Sandbox Cloud.', 'warning');
+          return false;
+        }
+
+        const quickSyncIcon = document.getElementById('quick-sync-icon');
+        quickSyncIcon.classList.add('animate-spin');
+
+        try {
+          const accessToken = state.storage.gdriveToken;
+
+          // Search if file already exists in drive/folder to overwrite with files.update
+          let existingFileId = state.storage.gdriveFileId;
+          if (!existingFileId) {
+            let q = `name = '${fileName}' and trashed = false`;
+            if (folderId && folderId !== 'root') {
+              q += ` and '${folderId}' in parents`;
+            }
+            const searchRes = await fetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)`, {
+              headers: { 'Authorization': `Bearer ${accessToken}` }
+            });
+            const searchData = await searchRes.json();
+            if (searchData.files && searchData.files.length > 0) {
+              existingFileId = searchData.files[0].id;
+              state.storage.gdriveFileId = existingFileId;
+            }
+          }
+
+          if (existingFileId) {
+            // Overwrite existing cloud file with files.update (uploadType=media)
+            const updateRes = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${existingFileId}?uploadType=media`, {
+              method: 'PATCH',
+              headers: {
+                'Authorization': `Bearer ${accessToken}`,
+                'Content-Type': 'application/json'
+              },
+              body: payloadStr
+            });
+
+            if (updateRes.ok) {
+              updateLastSavedIndicator();
+              showToast(`Google Drive: Successfully overwrote "${fileName}"`, 'success');
+              return true;
+            } else {
+              throw new Error(`Cloud update error ${updateRes.status}`);
+            }
+          } else {
+            // Create new file with files.create multipart
+            const metadata = {
+              name: fileName,
+              mimeType: 'application/json'
+            };
+            if (folderId && folderId !== 'root') {
+              metadata.parents = [folderId];
+            }
+
+            const boundary = '-------314159265358979323846';
+            const delimiter = "\r\n--" + boundary + "\r\n";
+            const close_delim = "\r\n--" + boundary + "--";
+
+            const multipartRequestBody =
+              delimiter +
+              'Content-Type: application/json\r\n\r\n' +
+              JSON.stringify(metadata) +
+              delimiter +
+              'Content-Type: application/json\r\n\r\n' +
+              payloadStr +
+              close_delim;
+
+            const createRes = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${accessToken}`,
+                'Content-Type': `multipart/related; boundary=${boundary}`
+              },
+              body: multipartRequestBody
+            });
+
+            const createData = await createRes.json();
+            if (createData.id) {
+              state.storage.gdriveFileId = createData.id;
+              updateLastSavedIndicator();
+              showToast(`Google Drive: Created and saved "${fileName}"`, 'success');
+              return true;
+            } else {
+              throw new Error('Cloud file creation failed');
+            }
+          }
+        } catch(err) {
+          console.error(err);
+          showToast('Google Drive sync failed: ' + err.message, 'error');
+        } finally {
+          quickSyncIcon.classList.remove('animate-spin');
+        }
+
+        return false;
+      }
+
+      // Fetch from Google Drive & Replace Workspace
+      async function fetchFromGoogleDriveCloud() {
+        const fileName = document.getElementById('input-cloud-filename').value.trim() || state.storage.gdriveFileName;
+        const folderId = document.getElementById('input-cloud-folder-id').value.trim();
+
+        // 1. Sandbox Mock Mode
+        if (state.storage.mockCloudEnabled) {
+          if (state.storage.mockCloudData) {
+            if (deserializeBoardPayload(state.storage.mockCloudData)) {
+              showToast(`[Mock Cloud] Workspace replaced with cloud file "${fileName}"`, 'success');
+              return true;
+            }
+          } else {
+            showToast('No mock cloud file exists yet. Save to cloud first!', 'warning');
+          }
+          return false;
+        }
+
+        // 2. Real Google Drive v3 API
+        if (!state.storage.gdriveConnected || !state.storage.gdriveToken) {
+          showToast('Google Drive is not connected.', 'warning');
+          return false;
+        }
+
+        const quickSyncIcon = document.getElementById('quick-sync-icon');
+        quickSyncIcon.classList.add('animate-spin');
+
+        try {
+          const accessToken = state.storage.gdriveToken;
+          let fileId = state.storage.gdriveFileId;
+
+          if (!fileId) {
+            let q = `name = '${fileName}' and trashed = false`;
+            if (folderId && folderId !== 'root') {
+              q += ` and '${folderId}' in parents`;
+            }
+            const searchRes = await fetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)`, {
+              headers: { 'Authorization': `Bearer ${accessToken}` }
+            });
+            const searchData = await searchRes.json();
+            if (searchData.files && searchData.files.length > 0) {
+              fileId = searchData.files[0].id;
+              state.storage.gdriveFileId = fileId;
+            } else {
+              showToast(`Cloud file "${fileName}" not found in Google Drive`, 'error');
+              return false;
+            }
+          }
+
+          // Download media content with alt=media
+          const downloadRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+            headers: { 'Authorization': `Bearer ${accessToken}` }
+          });
+
+          if (!downloadRes.ok) throw new Error(`Fetch error ${downloadRes.status}`);
+          const fileContent = await downloadRes.text();
+
+          if (deserializeBoardPayload(fileContent)) {
+            showToast(`Fetched and replaced board from Google Drive: "${fileName}"`, 'success');
+            return true;
+          } else {
+            showToast('Cloud file content was invalid', 'error');
+          }
+        } catch(err) {
+          console.error(err);
+          showToast('Failed to fetch from Google Drive: ' + err.message, 'error');
+        } finally {
+          quickSyncIcon.classList.remove('animate-spin');
+        }
+
+        return false;
+      }
+
+      // Quick Sync Trigger (Executes default sync target or both)
+      async function triggerQuickSync() {
+        const target = state.storage.defaultSyncTarget;
+        const icon = document.getElementById('quick-sync-icon');
+        icon.classList.add('animate-spin');
+
+        let success = true;
+        if (target === 'local' || target === 'both') {
+          const ok = await saveToLocalFolder();
+          if (!ok) success = false;
+        }
+
+        if (target === 'cloud' || target === 'both') {
+          const ok = await saveToGoogleDriveCloud();
+          if (!ok) success = false;
+        }
+
+        icon.classList.remove('animate-spin');
+      }
+
+      // 13. SETTINGS MODAL INTERFACES & TABS
+      const settingsModal = document.getElementById('settings-modal');
+      const tabBtnStorage = document.getElementById('tab-btn-storage');
+      const tabBtnCloud = document.getElementById('tab-btn-cloud');
+      const tabBtnGeneral = document.getElementById('tab-btn-general');
+
+      const tabPanelStorage = document.getElementById('tab-panel-storage');
+      const tabPanelCloud = document.getElementById('tab-panel-cloud');
+      const tabPanelGeneral = document.getElementById('tab-panel-general');
+
+      function switchSettingsTab(tabName) {
+        [tabBtnStorage, tabBtnCloud, tabBtnGeneral].forEach(b => {
+          b.className = 'pb-3 text-xs font-medium text-zinc-400 hover:text-zinc-200 border-b-2 border-transparent flex items-center gap-2 transition';
+        });
+        [tabPanelStorage, tabPanelCloud, tabPanelGeneral].forEach(p => p.classList.add('hidden'));
+
+        if (tabName === 'storage') {
+          tabBtnStorage.className = 'pb-3 text-xs font-semibold text-blue-400 border-b-2 border-blue-500 flex items-center gap-2 transition';
+          tabPanelStorage.classList.remove('hidden');
+        } else if (tabName === 'cloud') {
+          tabBtnCloud.className = 'pb-3 text-xs font-semibold text-blue-400 border-b-2 border-blue-500 flex items-center gap-2 transition';
+          tabPanelCloud.classList.remove('hidden');
+        } else if (tabName === 'general') {
+          tabBtnGeneral.className = 'pb-3 text-xs font-semibold text-blue-400 border-b-2 border-blue-500 flex items-center gap-2 transition';
+          tabPanelGeneral.classList.remove('hidden');
+        }
+      }
+
+      tabBtnStorage.addEventListener('click', () => switchSettingsTab('storage'));
+      tabBtnCloud.addEventListener('click', () => switchSettingsTab('cloud'));
+      tabBtnGeneral.addEventListener('click', () => switchSettingsTab('general'));
+
+      document.getElementById('btn-open-settings').addEventListener('click', () => settingsModal.classList.remove('hidden'));
+      document.getElementById('btn-close-settings').addEventListener('click', () => settingsModal.classList.add('hidden'));
+      document.getElementById('btn-save-settings-close').addEventListener('click', () => settingsModal.classList.add('hidden'));
+
+      // Wire Settings Action Buttons
+      document.getElementById('btn-pick-local-dir').addEventListener('click', pickLocalDirectory);
+      document.getElementById('btn-save-local-now').addEventListener('click', saveToLocalFolder);
+      document.getElementById('btn-fetch-local-now').addEventListener('click', fetchFromLocalFolder);
+
+      document.getElementById('btn-save-cloud-now').addEventListener('click', saveToGoogleDriveCloud);
+      document.getElementById('btn-fetch-cloud-now').addEventListener('click', fetchFromGoogleDriveCloud);
+      document.getElementById('btn-quick-sync').addEventListener('click', triggerQuickSync);
+
+      // Google Auth & Mock Sandbox buttons
+      const btnGdriveAuthToggle = document.getElementById('btn-gdrive-auth-toggle');
+      btnGdriveAuthToggle.addEventListener('click', () => {
+        if (state.storage.gdriveConnected) {
+          state.storage.gdriveConnected = false;
+          state.storage.gdriveToken = null;
+          updateCloudStatus('offline');
+          showToast('Google Drive disconnected', 'info');
+        } else {
+          initGoogleDriveAuth();
+        }
+      });
+
+      const btnUseMockCloud = document.getElementById('btn-use-mock-cloud');
+      btnUseMockCloud.addEventListener('click', () => {
+        state.storage.mockCloudEnabled = !state.storage.mockCloudEnabled;
+        if (state.storage.mockCloudEnabled) {
+          state.storage.gdriveConnected = false;
+          updateCloudStatus('mock');
+          btnUseMockCloud.classList.add('border-purple-500', 'text-purple-300');
+          showToast('Sandbox Mock Cloud enabled! You can now test save & fetch without Google keys.', 'success');
+        } else {
+          updateCloudStatus('offline');
+          btnUseMockCloud.classList.remove('border-purple-500', 'text-purple-300');
+          showToast('Sandbox Mock Cloud disabled', 'info');
+        }
+      });
+
+      // Preferences bindings
+      const prefAutoSyncToggle = document.getElementById('pref-auto-sync-toggle');
+      prefAutoSyncToggle.addEventListener('change', (e) => {
+        state.storage.autoSync = e.target.checked;
+        showToast(`Auto-Save ${e.target.checked ? 'enabled (every 2 mins)' : 'disabled'}`, 'info');
+      });
+
+      const prefDefaultSyncTarget = document.getElementById('pref-default-sync-target');
+      prefDefaultSyncTarget.addEventListener('change', (e) => {
+        state.storage.defaultSyncTarget = e.target.value;
+      });
+
+      // Periodic Auto-Sync Timer
+      setInterval(() => {
+        if (state.storage.autoSync && state.storage.hasUnsavedChanges) {
+          triggerQuickSync();
+        }
+      }, 120000);
+
+      // Manual fallback JSON import/export
+      document.getElementById('btn-download-json-fallback').addEventListener('click', () => {
+        downloadPayloadFallback(serializeBoardPayload(), 'canvasref_board_backup.crf');
+      });
+
+      document.getElementById('file-json-upload').addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (evt) => {
+          if (deserializeBoardPayload(evt.target.result)) {
+            showToast(`Board successfully loaded from ${file.name}!`, 'success');
+          } else {
+            showToast('Invalid board file', 'error');
+          }
+        };
+        reader.readAsText(file);
+        e.target.value = '';
+      });
+
+      // 14. UI TOOLBAR EVENT BINDINGS
+      const toolSelect = document.getElementById('tool-select');
+      const toolDraw = document.getElementById('tool-draw');
+      const toolLasso = document.getElementById('tool-lasso');
+
+      const subPen = document.getElementById('sub-tool-pen');
+      const subMarker = document.getElementById('sub-tool-marker');
+      const subEraser = document.getElementById('sub-tool-eraser');
+
+      function setToolMode(mode) {
+        state.toolMode = mode;
+        [toolSelect, toolDraw, toolLasso].forEach(b => {
+          b.className = 'p-2.5 rounded-xl text-zinc-300 hover:text-white hover:bg-white/10 flex items-center gap-1.5 transition';
+        });
+
+        viewport.classList.remove('mode-select', 'mode-lasso');
+        document.body.classList.remove('body-mode-draw');
+
+        if (mode === 'draw') {
+          toolDraw.className = 'p-2.5 rounded-xl bg-blue-600 text-white font-medium flex items-center gap-1.5 transition shadow-lg shadow-blue-500/25';
+          paletteBar.classList.remove('hidden');
+          document.body.classList.add('body-mode-draw');
+        } else if (mode === 'select') {
+          toolSelect.className = 'p-2.5 rounded-xl bg-blue-600 text-white font-medium flex items-center gap-1.5 transition shadow-lg shadow-blue-500/25';
+          paletteBar.classList.add('hidden');
+          viewport.classList.add('mode-select');
+        } else if (mode === 'lasso') {
+          toolLasso.className = 'p-2.5 rounded-xl bg-blue-600 text-white font-medium flex items-center gap-1.5 transition shadow-lg shadow-blue-500/25';
+          paletteBar.classList.add('hidden');
+          viewport.classList.add('mode-lasso');
+        }
+
+        updateReticleSize();
+      }
+
+      function setDrawTool(tool) {
+        state.drawTool = tool;
+        [subPen, subMarker, subEraser].forEach(b => {
+          b.classList.remove('bg-blue-600', 'text-white');
+          b.classList.add('text-zinc-400');
+        });
+        if (tool === 'pen') subPen.classList.add('bg-blue-600', 'text-white');
+        if (tool === 'marker') subMarker.classList.add('bg-blue-600', 'text-white');
+        if (tool === 'eraser') subEraser.classList.add('bg-blue-600', 'text-white');
+
+        const swatches = document.getElementById('swatches-group');
+        if (tool === 'eraser') swatches.classList.add('opacity-30', 'pointer-events-none');
+        else swatches.classList.remove('opacity-30', 'pointer-events-none');
+
+        updateReticleSize();
+      }
+
+      toolSelect.addEventListener('click', () => setToolMode('select'));
+      toolDraw.addEventListener('click', () => {
+        setToolMode('draw');
+        setDrawTool('pen');
+      });
+      toolLasso.addEventListener('click', () => setToolMode('lasso'));
+
+      subPen.addEventListener('click', () => setDrawTool('pen'));
+      subMarker.addEventListener('click', () => setDrawTool('marker'));
+      subEraser.addEventListener('click', () => setDrawTool('eraser'));
+
+      // Swatches
+      document.querySelectorAll('.swatch-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          state.brushColor = btn.dataset.color;
+          document.querySelectorAll('.swatch-btn').forEach(b => b.classList.remove('border-white'));
+          btn.classList.add('border-white');
+        });
+      });
+
+      const customColorInput = document.getElementById('custom-color-input');
+      const btnPickCustom = document.getElementById('btn-pick-custom');
+      btnPickCustom.addEventListener('click', () => customColorInput.click());
+      customColorInput.addEventListener('input', (e) => {
+        state.brushColor = e.target.value;
+        btnPickCustom.style.backgroundColor = e.target.value;
+      });
+
+      // Size Slider
+      const brushSizeSlider = document.getElementById('brush-size-slider');
+      const brushSizeVal = document.getElementById('brush-size-val');
+      brushSizeSlider.addEventListener('input', (e) => {
+        state.brushSize = parseInt(e.target.value, 10);
+        brushSizeVal.textContent = `${state.brushSize}px`;
+        updateReticleSize();
+      });
+
+      // Undo & Clear
+      function undoStroke() {
+        if (state.strokes.length > 0) {
+          state.strokes.pop();
+          markBoardModified();
+          requestCachedRepaint();
+        }
+      }
+      document.getElementById('btn-undo').addEventListener('click', undoStroke);
+
+      document.getElementById('btn-clear-ink').addEventListener('click', () => {
+        if (state.strokes.length > 0) {
+          state.strokes = [];
+          clearLassoSelection();
+          markBoardModified();
+          requestCachedRepaint();
+        }
+      });
+
+      // Stylus Palm Rejection
+      const stylusBtn = document.getElementById('btn-stylus-palm-toggle');
+      const stylusTxt = document.getElementById('stylus-status-txt');
+      stylusBtn.addEventListener('click', () => {
+        state.stylusOnly = !state.stylusOnly;
+        if (state.stylusOnly) {
+          stylusBtn.className = 'p-2 rounded-xl text-blue-400 bg-blue-500/10 border border-blue-500/30 flex items-center gap-1.5 transition';
+          stylusTxt.textContent = 'Stylus Only: ON';
+        } else {
+          stylusBtn.className = 'p-2 rounded-xl text-zinc-400 hover:text-white hover:bg-white/10 flex items-center gap-1.5 border border-white/5 transition';
+          stylusTxt.textContent = 'Stylus Only: OFF';
+        }
+      });
+
+      // Lasso Actions
+      document.getElementById('btn-lasso-commit').addEventListener('click', commitLassoTransform);
+      document.getElementById('btn-lasso-delete').addEventListener('click', deleteLassoSelected);
+
+      // Sticky Note
+      document.getElementById('btn-add-note').addEventListener('click', () => {
+        const center = screenToWorld(window.innerWidth / 2, window.innerHeight / 2);
+        addBoardItem({
+          type: 'note',
+          text: 'Quick reference note...',
+          x: center.x - 110,
+          y: center.y - 75,
+          width: 220,
+          height: 150
+        });
+      });
+
+      // Reset Camera
+      document.getElementById('btn-reset-view').addEventListener('click', () => {
+        state.zoom = 1.0;
+        state.panX = window.innerWidth / 2;
+        state.panY = window.innerHeight / 2;
+        updateWorldTransform();
+        requestCachedRepaint();
+      });
+
+      // Pack Images
+      document.getElementById('btn-pack-images').addEventListener('click', packReferenceImages);
+
+      // Grid Mode
+      document.getElementById('btn-toggle-grid').addEventListener('click', () => {
+        if (state.gridMode === 'dots') {
+          viewport.classList.remove('bg-grid-dots');
+          viewport.classList.add('bg-grid-lines');
+          state.gridMode = 'lines';
+        } else if (state.gridMode === 'lines') {
+          viewport.classList.remove('bg-grid-lines');
+          state.gridMode = 'none';
+        } else {
+          viewport.classList.add('bg-grid-dots');
+          state.gridMode = 'dots';
+        }
+      });
+
+      // Context Card Actions
+      document.getElementById('btn-flip-h').addEventListener('click', () => {
+        const item = state.items.find(i => i.id === state.selectedItemId);
+        if (item) {
+          item.flipH = (item.flipH || 1) * -1;
+          updateCardDOM(item);
+          markBoardModified();
+        }
+      });
+
+      document.getElementById('btn-flip-v').addEventListener('click', () => {
+        const item = state.items.find(i => i.id === state.selectedItemId);
+        if (item) {
+          item.flipV = (item.flipV || 1) * -1;
+          updateCardDOM(item);
+          markBoardModified();
+        }
+      });
+
+      document.getElementById('btn-rot-cw').addEventListener('click', () => {
+        const item = state.items.find(i => i.id === state.selectedItemId);
+        if (item) {
+          item.rotation = ((item.rotation || 0) + 90) % 360;
+          updateCardDOM(item);
+          markBoardModified();
+        }
+      });
+
+      document.getElementById('item-opacity').addEventListener('input', (e) => {
+        const item = state.items.find(i => i.id === state.selectedItemId);
+        if (item) {
+          item.opacity = parseInt(e.target.value, 10) / 100;
+          updateCardDOM(item);
+          markBoardModified();
+        }
+      });
+
+      document.getElementById('btn-bring-top').addEventListener('click', () => {
+        const item = state.items.find(i => i.id === state.selectedItemId);
+        if (item) {
+          item.zIndex = ++state.highestZ;
+          updateCardDOM(item);
+          markBoardModified();
+        }
+      });
+
+      document.getElementById('btn-delete-item').addEventListener('click', () => {
+        if (!state.selectedItemId) return;
+        const targetId = state.selectedItemId;
+        const idx = state.items.findIndex(i => i.id === targetId);
+        if (idx !== -1) {
+          const card = document.getElementById(targetId);
+          if (card) card.remove();
+          state.items.splice(idx, 1);
+          state.strokes = state.strokes.filter(s => s.parentId !== targetId);
+          selectCard(null);
+          markBoardModified();
+          requestCachedRepaint();
+        }
+      });
+
+      // Export Flattened PNG
+      document.getElementById('btn-export-view').addEventListener('click', () => {
+        const exportCanvas = document.createElement('canvas');
+        exportCanvas.width = viewWidth * dpr;
+        exportCanvas.height = viewHeight * dpr;
+        const eCtx = exportCanvas.getContext('2d');
+
+        eCtx.fillStyle = '#121316';
+        eCtx.fillRect(0, 0, exportCanvas.width, exportCanvas.height);
+        eCtx.drawImage(globalCachedCanvas, 0, 0);
+
+        const sortedItems = [...state.items].sort((a, b) => (a.zIndex || 0) - (b.zIndex || 0));
+
+        const cardPromises = sortedItems.map(item => {
+          return new Promise((resolve) => {
+            const cardEl = document.getElementById(item.id);
+            if (!cardEl) return resolve();
+
+            eCtx.save();
+            eCtx.scale(dpr, dpr);
+            const screenCoord = worldToScreen(item.x, item.y);
+            eCtx.translate(screenCoord.x + (item.width * state.zoom) / 2, screenCoord.y + (item.height * state.zoom) / 2);
+            eCtx.rotate((item.rotation * Math.PI) / 180);
+            eCtx.scale(item.flipH, item.flipV);
+            eCtx.globalAlpha = item.opacity;
+
+            if (item.type === 'image') {
+              const img = new Image();
+              img.crossOrigin = 'anonymous';
+              img.onload = () => {
+                eCtx.drawImage(
+                  img,
+                  -(item.width * state.zoom) / 2,
+                  -(item.height * state.zoom) / 2,
+                  item.width * state.zoom,
+                  item.height * state.zoom
+                );
+                const localInk = cardEl.querySelector('.card-ink-layer');
+                if (localInk) {
+                  eCtx.drawImage(
+                    localInk,
+                    -(item.width * state.zoom) / 2,
+                    -(item.height * state.zoom) / 2,
+                    item.width * state.zoom,
+                    item.height * state.zoom
+                  );
+                }
+                eCtx.restore();
+                resolve();
+              };
+              img.onerror = () => { eCtx.restore(); resolve(); };
+              img.src = item.src;
+            } else {
+              eCtx.fillStyle = '#fef08a';
+              eCtx.fillRect(
+                -(item.width * state.zoom) / 2,
+                -(item.height * state.zoom) / 2,
+                item.width * state.zoom,
+                item.height * state.zoom
+              );
+              eCtx.fillStyle = '#1e293b';
+              eCtx.font = `${13 * state.zoom}px sans-serif`;
+              eCtx.fillText(item.text, -(item.width * state.zoom) / 2 + 10, -(item.height * state.zoom) / 2 + 25);
+
+              const localInk = cardEl.querySelector('.card-ink-layer');
+              if (localInk) {
+                eCtx.drawImage(
+                  localInk,
+                  -(item.width * state.zoom) / 2,
+                  -(item.height * state.zoom) / 2,
+                  item.width * state.zoom,
+                  item.height * state.zoom
+                );
+              }
+              eCtx.restore();
+              resolve();
+            }
+          });
+        });
+
+        Promise.all(cardPromises).then(() => {
+          const a = document.createElement('a');
+          a.download = `canvasref-export-${Date.now()}.png`;
+          a.href = exportCanvas.toDataURL('image/png');
+          a.click();
+        });
+      });
+
+      // Keyboard Shortcuts
+      window.addEventListener('keydown', (e) => {
+        if (e.target.tagName.toLowerCase() === 'textarea' || e.target.tagName.toLowerCase() === 'input') return;
+
+        if (e.code === 'Space') {
+          state.spacePressed = true;
+          viewport.classList.add('is-panning');
+        }
+
+        if (e.key === 'p' || e.key === 'P') {
+          setToolMode('draw');
+          setDrawTool('pen');
+        }
+        if (e.key === 'h' || e.key === 'H') {
+          setToolMode('draw');
+          setDrawTool('marker');
+        }
+        if (e.key === 'e' || e.key === 'E') {
+          setToolMode('draw');
+          setDrawTool('eraser');
+        }
+        if (e.key === 'l' || e.key === 'L') {
+          setToolMode('lasso');
+        }
+        if (e.key === 'v' || e.key === 'V') {
+          if (state.lassoBox) commitLassoTransform();
+          setToolMode('select');
+        }
+        if (e.key === 'n' || e.key === 'N') {
+          document.getElementById('btn-add-note').click();
+        }
+        if (e.key === 's' || e.key === 'S') {
+          settingsModal.classList.toggle('hidden');
+        }
+
+        if (e.key === 'Escape') {
+          if (!settingsModal.classList.contains('hidden')) settingsModal.classList.add('hidden');
+          else if (state.lassoBox) commitLassoTransform();
+          else selectCard(null);
+        }
+
+        if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) {
+          e.preventDefault();
+          undoStroke();
+        }
+
+        if ((e.ctrlKey || e.metaKey) && (e.key === 's' || e.key === 'S')) {
+          e.preventDefault();
+          triggerQuickSync();
+        }
+
+        if (e.key === 'Delete' || e.key === 'Backspace') {
+          if (state.lassoBox) deleteLassoSelected();
+          else if (state.selectedItemId) document.getElementById('btn-delete-item').click();
+        }
+      });
+
+      window.addEventListener('keyup', (e) => {
+        if (e.code === 'Space') {
+          state.spacePressed = false;
+          if (!state.isPanning) viewport.classList.remove('is-panning');
+        }
+      });
+
+      // Help Modal
+      const helpDialog = document.getElementById('help-dialog');
+      document.getElementById('btn-open-help').addEventListener('click', () => helpDialog.classList.remove('hidden'));
+      document.getElementById('btn-close-help').addEventListener('click', () => helpDialog.classList.add('hidden'));
+      document.getElementById('btn-close-help-confirm').addEventListener('click', () => helpDialog.classList.add('hidden'));
+
+      // 15. INITIALIZATION
+      function init() {
+        resizeCanvases();
+
+        const raw = localStorage.getItem('canvasref_v6_board');
+        if (raw) {
+          deserializeBoardPayload(raw);
+        } else {
+          addBoardItem({
+            type: 'note',
+            text: "🎨 Welcome to CanvasRef v6!\n\n• Press (S) to open Storage & Settings:\n  - Link a local folder for 1-click overwrite\n  - Connect Google Drive Cloud Sync or test with Sandbox Mock Cloud\n• True Z-Depth Drawing: Drawings over notes and images stack naturally.\n• Universal Lasso (L): Circle any mix of strokes, images, and notes.\n• Quick Sync: Top right Sync button or Ctrl+S.",
+            x: -140,
+            y: -100,
+            width: 280,
+            height: 200
+          });
+        }
+
+        updateWorldTransform();
+        updateReticleSize();
+        lucide.createIcons();
+      }
+
+      window.onload = init;
+    })();
+  </script>
+</body>
+</html>
