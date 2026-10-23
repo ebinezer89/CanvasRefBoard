@@ -2512,115 +2512,82 @@
 
       // Save / Overwrite Cloud File (Drive REST API v3)
       async function saveToGoogleDriveCloud() {
-        const fileName = document.getElementById('input-cloud-filename').value.trim() || state.storage.gdriveFileName;
-        const folderId = document.getElementById('input-cloud-folder-id').value.trim();
-        const payloadStr = serializeBoardPayload();
-
-        // 1. Sandbox Mock Cloud Mode
-        if (state.storage.mockCloudEnabled) {
-          state.storage.mockCloudData = payloadStr;
-          updateLastSavedIndicator();
-          showToast(`[Mock Cloud] Successfully overwrote cloud file "${fileName}"`, 'success');
-          return true;
+        const token = gapi.client.getToken()?.access_token || gDriveToken;
+        if (!token) {
+          showToast('Please authorize Google Drive first', 'error');
+          return;
         }
-
-        // 2. Real Google Drive v3 API
-        if (!state.storage.gdriveConnected || !state.storage.gdriveToken) {
-          showToast('Google Drive is not connected. Open Settings to connect or enable Sandbox Cloud.', 'warning');
-          return false;
-        }
-
-        const quickSyncIcon = document.getElementById('quick-sync-icon');
-        quickSyncIcon.classList.add('animate-spin');
-
+      
+        const fileName = document.getElementById('gdrive-filename').value.trim() || 'canvasref_board.crf';
+        const folderInput = document.getElementById('gdrive-folder-id').value.trim();
+        const folderId = (folderInput && folderInput !== 'root or specific folder ID') ? folderInput : null;
+        const boardData = JSON.stringify(exportBoardState());
+      
+        showToast('Saving to Google Drive...', 'info');
+      
         try {
-          const accessToken = state.storage.gdriveToken;
-
-          // Search if file already exists in drive/folder to overwrite with files.update
-          let existingFileId = state.storage.gdriveFileId;
-          if (!existingFileId) {
-            let q = `name = '${fileName}' and trashed = false`;
-            if (folderId && folderId !== 'root') {
-              q += ` and '${folderId}' in parents`;
-            }
-            const searchRes = await fetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name)`, {
-              headers: { 'Authorization': `Bearer ${accessToken}` }
-            });
-            const searchData = await searchRes.json();
-            if (searchData.files && searchData.files.length > 0) {
-              existingFileId = searchData.files[0].id;
-              state.storage.gdriveFileId = existingFileId;
-            }
+          // 1. Search Google Drive specifically for a file with the NEW fileName
+          let query = `name = '${fileName}' and trashed = false`;
+          if (folderId) {
+            query += ` and '${folderId}' in parents`;
           }
-
-          if (existingFileId) {
-            // Overwrite existing cloud file with files.update (uploadType=media)
-            const updateRes = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${existingFileId}?uploadType=media`, {
+      
+          const searchRes = await fetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(query)}&fields=files(id,name)`, {
+            headers: { Authorization: `Bearer ${token}` }
+          });
+          const searchData = await searchRes.json();
+          const existingFile = searchData.files && searchData.files.length > 0 ? searchData.files[0] : null;
+      
+          if (existingFile) {
+            // 2A. A file with this EXACT name already exists -> OVERWRITE IT
+            await fetch(`https://www.googleapis.com/upload/drive/v3/files/${existingFile.id}?uploadType=media`, {
               method: 'PATCH',
               headers: {
-                'Authorization': `Bearer ${accessToken}`,
+                Authorization: `Bearer ${token}`,
                 'Content-Type': 'application/json'
               },
-              body: payloadStr
+              body: boardData
             });
-
-            if (updateRes.ok) {
-              updateLastSavedIndicator();
-              showToast(`Google Drive: Successfully overwrote "${fileName}"`, 'success');
-              return true;
-            } else {
-              throw new Error(`Cloud update error ${updateRes.status}`);
-            }
+            showToast(`Cloud file '${fileName}' overwritten successfully!`, 'success');
           } else {
-            // Create new file with files.create multipart
+            // 2B. This is a NEW file name -> CREATE A BRAND NEW FILE IN GOOGLE DRIVE
             const metadata = {
               name: fileName,
               mimeType: 'application/json'
             };
-            if (folderId && folderId !== 'root') {
+            if (folderId) {
               metadata.parents = [folderId];
             }
-
+      
             const boundary = '-------314159265358979323846';
             const delimiter = "\r\n--" + boundary + "\r\n";
-            const close_delim = "\r\n--" + boundary + "--";
-
+            const closeDelim = "\r\n--" + boundary + "--";
+      
             const multipartRequestBody =
               delimiter +
-              'Content-Type: application/json\r\n\r\n' +
+              'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
               JSON.stringify(metadata) +
               delimiter +
               'Content-Type: application/json\r\n\r\n' +
-              payloadStr +
-              close_delim;
-
+              boardData +
+              closeDelim;
+      
             const createRes = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
               method: 'POST',
               headers: {
-                'Authorization': `Bearer ${accessToken}`,
+                Authorization: `Bearer ${token}`,
                 'Content-Type': `multipart/related; boundary=${boundary}`
               },
               body: multipartRequestBody
             });
-
-            const createData = await createRes.json();
-            if (createData.id) {
-              state.storage.gdriveFileId = createData.id;
-              updateLastSavedIndicator();
-              showToast(`Google Drive: Created and saved "${fileName}"`, 'success');
-              return true;
-            } else {
-              throw new Error('Cloud file creation failed');
-            }
+      
+            if (!createRes.ok) throw new Error('Cloud file creation failed');
+            showToast(`New cloud file '${fileName}' created!`, 'success');
           }
-        } catch(err) {
+        } catch (err) {
           console.error(err);
-          showToast('Google Drive sync failed: ' + err.message, 'error');
-        } finally {
-          quickSyncIcon.classList.remove('animate-spin');
+          showToast(`Google Drive sync failed: ${err.message}`, 'error');
         }
-
-        return false;
       }
 
       // Fetch from Google Drive & Replace Workspace
